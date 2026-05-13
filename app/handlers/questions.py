@@ -18,7 +18,7 @@ from database.crud import (
 )
 from database.db import SessionLocal
 from ..config import config
-from services.entitlement_policy import EntitlementPolicy
+from services.entitlement_policy import EntitlementPolicy, EntitlementExplanation, log_entitlement_decision
 from services.reconciliation_service import ReconciliationService
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,20 @@ router = Router()
 # Global bot instance for sending messages
 _bot_instance = None
 policy = EntitlementPolicy()
+
+
+def _entitlement_denial_user_message(expl: EntitlementExplanation, user_status: str) -> str:
+    if expl.reason == "user_not_approved":
+        return (
+            "❌ Access required\n\n"
+            f"Your current status: {user_status}\n\n"
+            "You need to be approved to ask questions.\n"
+            "Please start the verification process by sending /start"
+        )
+    return (
+        "❌ Your subscription is inactive or expired.\n"
+        "Use /renew to restore access."
+    )
 
 
 async def validate_question_content(question_text: str, message: Message) -> bool:
@@ -97,27 +111,16 @@ async def handle_private_question(message: Message) -> None:
             return
         
         expl = policy.explain_question_entitlement(user)
-        logger.info(
-            "Entitlement DEBUG user_id=%s user_status=%s subscription_status=%s decision=%s reason=%s allows_questions=%s",
-            user_id,
-            user.status,
-            expl.subscription_status,
-            expl.decision,
-            expl.reason,
-            expl.allows_questions,
-        )
+        log_entitlement_decision(logger, expl, user_id)
 
         if not expl.allows_questions:
             ReconciliationService(db).log_user_entitlement_state(user_id)
-            await message.answer(
-                f"❌ **Access Required**\n\n"
-                f"Your current status: {user.status}\n\n"
-                "You need active VIP access to ask questions right now."
-            )
+            await message.answer(_entitlement_denial_user_message(expl, user.status))
             logger.info(
-                "Question blocked by entitlement user_id=%s user_status=%s",
+                "Question blocked by entitlement user_id=%s user_status=%s reason=%s",
                 user_id,
                 user.status,
+                expl.reason,
             )
             return
         
