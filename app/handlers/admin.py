@@ -11,11 +11,16 @@ from aiogram.exceptions import TelegramBadRequest
 
 from database.crud import (
     get_user, update_user_status, get_all_users, get_pending_users, get_user_count_by_status,
-    retry_failed_delivery, update_question_status, reset_user_completely, reject_user
+    retry_failed_delivery, update_question_status, reset_user_completely, reject_user, create_user,
 )
 from database.db import SessionLocal
 from database.models import User
 from ..config import config
+from services.subscription_service import SubscriptionService
+from services.subscription_readout import build_subscription_view, format_admin_subscription_status_message
+from services.entitlement_policy import EntitlementPolicy
+from services.payments.factory import build_payment_gateway
+from services.payments.webhook_service import WebhookService
 
 logger = logging.getLogger(__name__)
 
@@ -388,6 +393,113 @@ async def handle_stats_command(message: Message) -> None:
         db.close()
 
 
+@router.message(Command("sub_status"), AdminFilter(config.admin_id))
+async def handle_sub_status_command(message: Message) -> None:
+    """Admin: read-only subscription + entitlement snapshot."""
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Usage: /sub_status <user_id>")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user_id (must be numeric).")
+        return
+
+    db = SessionLocal()
+    try:
+        svc = SubscriptionService(db)
+        user = get_user(db, target_id)
+        snap = svc.get_subscription_snapshot(target_id, user=user)
+        expl = EntitlementPolicy().explain_question_entitlement(user)
+        vm = build_subscription_view(snap, expl)
+        await message.answer(format_admin_subscription_status_message(target_id, vm))
+        logger.info("admin sub_status target=%s by=%s", target_id, message.from_user.id)
+    finally:
+        db.close()
+
+
+@router.message(Command("sub_activate"), AdminFilter(config.admin_id))
+async def handle_sub_activate_command(message: Message) -> None:
+    """Admin: activate subscription via SubscriptionService."""
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Usage: /sub_activate <user_id>")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user_id (must be numeric).")
+        return
+
+    db = SessionLocal()
+    try:
+        svc = SubscriptionService(db)
+        ok = svc.admin_activate_subscription(
+            target_id,
+            admin_user_id=message.from_user.id,
+        )
+        await message.answer("✅ Activated." if ok else "❌ Activation failed (see logs).")
+    finally:
+        db.close()
+
+
+@router.message(Command("sub_expire"), AdminFilter(config.admin_id))
+async def handle_sub_expire_command(message: Message) -> None:
+    """Admin: force-expire latest subscription row."""
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Usage: /sub_expire <user_id>")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user_id (must be numeric).")
+        return
+
+    db = SessionLocal()
+    try:
+        svc = SubscriptionService(db)
+        ok = svc.force_expire_subscription(target_id, admin_user_id=message.from_user.id)
+        await message.answer("✅ Marked EXPIRED." if ok else "❌ No subscription row to expire.")
+    finally:
+        db.close()
+
+
+@router.message(Command("sub_grace"), AdminFilter(config.admin_id))
+async def handle_sub_grace_command(message: Message) -> None:
+    """Admin: move subscription to grace."""
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Usage: /sub_grace <user_id> [grace_days]")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user_id (must be numeric).")
+        return
+
+    grace_days = 3
+    if len(parts) >= 3:
+        try:
+            grace_days = int(parts[2])
+        except ValueError:
+            await message.answer("grace_days must be numeric.")
+            return
+
+    db = SessionLocal()
+    try:
+        svc = SubscriptionService(db)
+        ok = svc.admin_move_to_grace(
+            target_id,
+            admin_user_id=message.from_user.id,
+            grace_days=grace_days,
+        )
+        await message.answer("✅ Moved to GRACE." if ok else "❌ Grace transition failed (see logs).")
+    finally:
+        db.close()
+
+
 @router.message(Command("admin_help"), AdminFilter(config.admin_id))
 async def handle_admin_help_command(message: Message) -> None:
     """Handle /admin_help command to show admin commands."""
@@ -412,6 +524,12 @@ async def show_admin_menu(message: Message) -> None:
         "/users - Show all users with details\n"
         "/pending - Show all users pending approval\n"
         "/stats - View user statistics\n"
+        "/simulate_payment <user_id> <success|failed|renew|cancel> - Simulate payment event\n"
+        "/simulate_subscription_expiry <user_id> - Simulate subscription expiry\n"
+        "/sub_status <user_id> - Subscription + entitlement snapshot\n"
+        "/sub_activate <user_id> - Activate subscription (service layer)\n"
+        "/sub_expire <user_id> - Force-expire latest subscription\n"
+        "/sub_grace <user_id> [days] - Move subscription to grace\n"
         "/admin_help - Show this menu\n\n"
         "Or use the buttons below for quick actions:"
     )
@@ -539,6 +657,38 @@ async def handle_unauthorized_users(message: Message) -> None:
 @router.message(Command("admin_help"))
 async def handle_unauthorized_admin_help(message: Message) -> None:
     """Handle unauthorized /admin_help attempts."""
+    await message.answer("❌ You are not authorized to use this command.")
+
+
+@router.message(Command("simulate_payment"))
+async def handle_unauthorized_simulate_payment(message: Message) -> None:
+    """Handle unauthorized /simulate_payment attempts."""
+    await message.answer("❌ You are not authorized to use this command.")
+
+
+@router.message(Command("simulate_subscription_expiry"))
+async def handle_unauthorized_simulate_subscription_expiry(message: Message) -> None:
+    """Handle unauthorized /simulate_subscription_expiry attempts."""
+    await message.answer("❌ You are not authorized to use this command.")
+
+
+@router.message(Command("sub_status"))
+async def handle_unauthorized_sub_status(message: Message) -> None:
+    await message.answer("❌ You are not authorized to use this command.")
+
+
+@router.message(Command("sub_activate"))
+async def handle_unauthorized_sub_activate(message: Message) -> None:
+    await message.answer("❌ You are not authorized to use this command.")
+
+
+@router.message(Command("sub_expire"))
+async def handle_unauthorized_sub_expire(message: Message) -> None:
+    await message.answer("❌ You are not authorized to use this command.")
+
+
+@router.message(Command("sub_grace"))
+async def handle_unauthorized_sub_grace(message: Message) -> None:
     await message.answer("❌ You are not authorized to use this command.")
 
 
@@ -771,6 +921,88 @@ async def retry_failed_question_command(message: Message) -> None:
     except Exception as e:
         logger.error(f"Error in retry command: {e}")
         await message.answer("❌ An error occurred while processing the retry command.")
+
+
+@router.message(Command("simulate_payment"))
+async def simulate_payment_command(message: Message) -> None:
+    """
+    Simulate payment events locally.
+    Usage: /simulate_payment <user_id> <success|failed|renew|cancel>
+    """
+    if not message.from_user or message.from_user.id != config.admin_id:
+        return
+
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer(
+            "❌ **Invalid Command**\n\n"
+            "Usage: `/simulate_payment <user_id> <success|failed|renew|cancel>`"
+        )
+        return
+
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ User ID must be numeric.")
+        return
+
+    action = parts[2].lower()
+    event_map = {
+        "success": "payment.succeeded",
+        "failed": "payment.failed",
+        "renew": "subscription.renewed",
+        "cancel": "subscription.cancelled",
+    }
+    event_type = event_map.get(action)
+    if not event_type:
+        await message.answer("❌ Action must be one of: success, failed, renew, cancel")
+        return
+
+    db = SessionLocal()
+    try:
+        gateway = build_payment_gateway()
+        webhook = WebhookService(db, gateway)
+        ok = webhook.process_mock_event(event_type=event_type, user_id=user_id)
+        if ok:
+            await message.answer(f"✅ Simulated `{event_type}` for user `{user_id}`", parse_mode="Markdown")
+        else:
+            await message.answer(f"❌ Failed to simulate `{event_type}` for user `{user_id}`", parse_mode="Markdown")
+    finally:
+        db.close()
+
+
+@router.message(Command("simulate_subscription_expiry"))
+async def simulate_subscription_expiry_command(message: Message) -> None:
+    """
+    Simulate subscription expiry transition for local testing.
+    Usage: /simulate_subscription_expiry <user_id>
+    """
+    if not message.from_user or message.from_user.id != config.admin_id:
+        return
+
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer(
+            "❌ **Invalid Command**\n\n"
+            "Usage: `/simulate_subscription_expiry <user_id>`"
+        )
+        return
+
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ User ID must be numeric.")
+        return
+
+    db = SessionLocal()
+    try:
+        service = SubscriptionService(db)
+        if service.expire_subscription(user_id):
+            await message.answer(f"✅ Simulated subscription expiry for user `{user_id}`", parse_mode="Markdown")
+        else:
+            await message.answer(f"❌ No active subscription found for user `{user_id}`", parse_mode="Markdown")
+    finally:
+        db.close()
 
 
 # TODO: remove in production if not needed

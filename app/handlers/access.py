@@ -10,9 +10,10 @@ from aiogram.enums import ChatType
 from aiogram.filters import Command
 from sqlalchemy.orm import Session
 
-from database.crud import get_user, update_user_status, get_user_count_by_status
+from database.crud import create_user, get_user, update_user_status, get_user_count_by_status
 from database.db import SessionLocal
 from ..config import config
+from services.entitlement_policy import EntitlementPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ router = Router()
 
 # Global bot instance for sending messages
 _bot_instance = None
+policy = EntitlementPolicy()
 
 def setup_bot_instance(bot: Bot) -> None:
     """Setup bot instance for sending messages."""
@@ -132,7 +134,14 @@ async def handle_status_command(message: Message) -> None:
             }
             
             status_text = status_messages.get(user.status, "❓ Unknown Status")
-            
+            if user.status == "APPROVED":
+                expl = policy.explain_question_entitlement(user)
+                if expl.allows_questions:
+                    status_text += "\n💳 VIP entitlement: Active"
+                else:
+                    status_text += "\n💳 VIP entitlement: Inactive (subscription required)"
+            status_text += "\n\n📎 Billing & access: /subscription"
+
             await message.answer(
                 f"📊 Your Current Status: {status_text}"
             )

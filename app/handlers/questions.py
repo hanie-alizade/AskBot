@@ -18,6 +18,8 @@ from database.crud import (
 )
 from database.db import SessionLocal
 from ..config import config
+from services.entitlement_policy import EntitlementPolicy
+from services.reconciliation_service import ReconciliationService
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,7 @@ router = Router()
 
 # Global bot instance for sending messages
 _bot_instance = None
+policy = EntitlementPolicy()
 
 
 async def validate_question_content(question_text: str, message: Message) -> bool:
@@ -93,13 +96,29 @@ async def handle_private_question(message: Message) -> None:
             logger.info(f"Unregistered user {user_id} tried to send question")
             return
         
-        if user.status != "APPROVED":
+        expl = policy.explain_question_entitlement(user)
+        logger.info(
+            "Entitlement DEBUG user_id=%s user_status=%s subscription_status=%s decision=%s reason=%s allows_questions=%s",
+            user_id,
+            user.status,
+            expl.subscription_status,
+            expl.decision,
+            expl.reason,
+            expl.allows_questions,
+        )
+
+        if not expl.allows_questions:
+            ReconciliationService(db).log_user_entitlement_state(user_id)
             await message.answer(
                 f"❌ **Access Required**\n\n"
                 f"Your current status: {user.status}\n\n"
-                "Only approved users can ask questions. Please wait for admin approval."
+                "You need active VIP access to ask questions right now."
             )
-            logger.info(f"Non-approved user {user_id} (status: {user.status}) tried to send question")
+            logger.info(
+                "Question blocked by entitlement user_id=%s user_status=%s",
+                user_id,
+                user.status,
+            )
             return
         
         # Validate question content
@@ -146,7 +165,7 @@ async def handle_private_question(message: Message) -> None:
 async def check_question_limit(user, message: Message) -> bool:
     """Check if user has remaining questions for the month."""
     try:
-        # Check if user has reached their daily limit
+        # Keep existing Phase 1 limit behavior unchanged for safe rollout.
         if user.questions_used >= user.question_limit:
             await message.answer(
                 "❌ **Question Limit Reached**\n\n"
