@@ -6,7 +6,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from database.models import User
-from .entitlement_policy import EntitlementPolicy
+from .entitlement_policy import EntitlementPolicy, log_entitlement_decision
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +26,9 @@ class ReconciliationService:
         allowed = self.policy.can_access_vip(user)
         if user.status == "APPROVED" and not allowed:
             expl = self.policy.explain_question_entitlement(user)
+            log_entitlement_decision(logger, expl, user.telegram_id)
             logger.warning(
-                "Entitlement mismatch user=%s status=%s subscription=%s decision=%s reason=%s",
+                "Entitlement mismatch (approved user denied): user_id=%s reason=%s",
                 user.telegram_id,
-                user.status,
-                str(user.subscription.status) if user.subscription else "NONE",
-                expl.decision,
                 expl.reason,
             )
