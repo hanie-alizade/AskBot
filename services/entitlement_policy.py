@@ -149,8 +149,11 @@ class EntitlementPolicy:
         Mock payment mode does not change this outcome; it only affects checkout/webhooks.
 
         Dead subscription rows (EXPIRED, CANCELLED, lapsed ACTIVE/GRACE, etc.) always deny,
-        even when SUBSCRIPTION_ENFORCEMENT_ENABLED is false. Rollout bypass only applies when
-        there is no subscription row or the row still grants access.
+        even when SUBSCRIPTION_ENFORCEMENT_ENABLED is false.
+
+        Approved users need a subscription row in a valid ACTIVE or GRACE window to ask
+        questions. Missing subscription always denies. When enforcement is disabled but the
+        row is valid, the reason remains enforcement_disabled (billing rollout UX only).
         """
         if not user:
             return EntitlementExplanation(
@@ -191,16 +194,6 @@ class EntitlementPolicy:
                     grace_valid=row_expl.grace_valid,
                 )
             return row_expl
-
-        if not config.subscription_enforcement_enabled:
-            return EntitlementExplanation(
-                decision="ALLOW",
-                reason="enforcement_disabled",
-                allows_questions=True,
-                subscription_status=None,
-                user_status=user.status,
-                grace_valid=False,
-            )
 
         return EntitlementExplanation(
             decision="DENY",

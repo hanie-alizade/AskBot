@@ -198,7 +198,7 @@ async def handle_help_command(message: Message) -> None:
             help_text += "/start - Show approved status\n"
             help_text += "/help - Show this help message\n"
             help_text += "/status - Check your current status\n\n"
-            help_text += "You have access to the VIP group! Check your messages for the invite link."
+            help_text += "You are approved. After an active subscription, you get the VIP invite in private chat. Use /subscription."
         
         await message.answer(help_text)
         logger.info(f"User {user_id} requested help")

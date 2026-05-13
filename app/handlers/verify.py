@@ -7,15 +7,15 @@ import logging
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
-from sqlalchemy.orm import Session
-
 from database.crud import create_user, get_user, update_user_status
 from database.db import SessionLocal
 from ..config import config
+from services.entitlement_policy import EntitlementPolicy
 
 logger = logging.getLogger(__name__)
 
 router = Router()
+_entitlement = EntitlementPolicy()
 
 
 @router.message(Command("start"))
@@ -109,22 +109,45 @@ async def handle_pending_user(message: Message, user) -> None:
 
 
 async def handle_approved_user(message: Message, user) -> None:
-    """Handle already approved user."""
+    """Approved user: VIP join link only when subscription entitles them."""
     user_id = message.from_user.id
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎉 Join VIP Group", url=config.group_invite_link)],
-        [InlineKeyboardButton(text="📊 Check Status", callback_data="check_status")],
-        [InlineKeyboardButton(text="❓ Help", callback_data="show_help")]
-    ])
-    
-    await message.answer(
-        "🎉 Congratulations! You already have access to the VIP group.\n\n"
-        "Click the button below to join or check your messages for the invite link.",
-        reply_markup=keyboard
-    )
-    
-    logger.info(f"Sent approved message to user {user_id}")
+
+    db = SessionLocal()
+    try:
+        fresh = get_user(db, user_id)
+        if not fresh:
+            return
+        can_vip = _entitlement.explain_question_entitlement(fresh).allows_questions
+    finally:
+        db.close()
+
+    if can_vip:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🎉 Join VIP Group", url=config.group_invite_link)],
+                [InlineKeyboardButton(text="📊 Check Status", callback_data="check_status")],
+                [InlineKeyboardButton(text="❓ Help", callback_data="show_help")],
+            ]
+        )
+        await message.answer(
+            "You are approved and your subscription is active.\n\n"
+            "Use the button below to open the VIP group invite.",
+            reply_markup=keyboard,
+        )
+    else:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📊 Subscription", callback_data="check_status")],
+                [InlineKeyboardButton(text="❓ Help", callback_data="show_help")],
+            ]
+        )
+        await message.answer(
+            "You are approved. Activate a subscription to get the VIP group invite.\n\n"
+            "Use /subscription and /subscribe (or /renew) in private chat with this bot.",
+            reply_markup=keyboard,
+        )
+
+    logger.info("Sent approved-user message to %s (vip_eligible=%s)", user_id, can_vip)
 
 
 @router.callback_query(F.data == "verify_user")

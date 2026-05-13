@@ -21,6 +21,7 @@ from services.subscription_readout import build_subscription_view, format_admin_
 from services.entitlement_policy import EntitlementPolicy
 from services.payments.factory import build_payment_gateway
 from services.payments.webhook_service import WebhookService
+from services.vip_invite import notify_vip_invite_if_eligible
 
 logger = logging.getLogger(__name__)
 
@@ -99,13 +100,12 @@ async def handle_approve_command(message: Message) -> None:
                 await message.answer("❌ Failed to approve user. Please try again.")
                 return
             
-            # Send invite link to user
-            await send_invite_to_user(user_id)
-            
-            # Confirm approval to admin
+            await send_approval_notice(user_id)
+
             await message.answer(
-                f"✅ User {user_id} has been approved!\n\n"
-                f"An invite link has been sent to the user."
+                f"✅ User {user_id} has been approved.\n\n"
+                f"They were notified in private chat. The VIP invite is sent only after "
+                f"they have an active subscription (or valid grace)."
             )
             
             logger.info(f"Admin {message.from_user.id} approved user {user_id}")
@@ -261,31 +261,27 @@ async def send_rejection_notification(user_id: int, reason: str) -> None:
         
     except Exception as e:
         logger.error(f"Error sending rejection notification to user {user_id}: {e}")
-        
-    except Exception as e:
-        logger.error(f"Error in approve command: {e}")
-        await message.answer("❌ An error occurred while processing the approval.")
 
 
-async def send_invite_to_user(user_id: int) -> None:
-    """Send group invite link to approved user."""
+async def send_approval_notice(user_id: int) -> None:
+    """Tell user they are approved; VIP link is sent later when subscription is valid."""
+    if not _bot_instance:
+        logger.warning("Bot instance not available for approval notice user_id=%s", user_id)
+        return
     try:
-        invite_message = (
-            f"🎉 Congratulations! Your access request has been approved!\n\n"
-            f"You've been granted access to the VIP group. "
-            f"Click the link below to join:\n\n"
-            f"{config.group_invite_link}\n\n"
-            f"Welcome to the community! 🎊"
+        await _bot_instance.send_message(
+            chat_id=user_id,
+            text=(
+                "🎉 Your access request was approved.\n\n"
+                "Use /subscription to see your billing status, and /subscribe or /renew "
+                "to activate a plan when available.\n\n"
+                "You will receive a separate private message with the VIP group invite link "
+                "once your subscription is active (including a valid grace period)."
+            ),
         )
-        
-        if _bot_instance:
-            await _bot_instance.send_message(user_id, invite_message)
-            logger.info(f"Invite sent to user {user_id}")
-        else:
-            logger.warning(f"Bot instance not available. Invite message for user {user_id}: {invite_message}")
-        
+        logger.info("Approval notice sent user_id=%s", user_id)
     except Exception as e:
-        logger.error(f"Failed to send invite to user {user_id}: {e}")
+        logger.error("Failed to send approval notice to user %s: %s", user_id, e)
 
 
 @router.message(Command("pending"), AdminFilter(config.admin_id))
@@ -439,6 +435,8 @@ async def handle_sub_activate_command(message: Message) -> None:
             target_id,
             admin_user_id=message.from_user.id,
         )
+        if ok and _bot_instance:
+            await notify_vip_invite_if_eligible(_bot_instance, target_id)
         await message.answer("✅ Activated." if ok else "❌ Activation failed (see logs).")
     finally:
         db.close()
@@ -495,6 +493,8 @@ async def handle_sub_grace_command(message: Message) -> None:
             admin_user_id=message.from_user.id,
             grace_days=grace_days,
         )
+        if ok and _bot_instance:
+            await notify_vip_invite_if_eligible(_bot_instance, target_id)
         await message.answer("✅ Moved to GRACE." if ok else "❌ Grace transition failed (see logs).")
     finally:
         db.close()
@@ -718,13 +718,12 @@ async def handle_approve_callback(callback: CallbackQuery) -> None:
             
             # Approve user
             if update_user_status(db, user_id, "APPROVED"):
-                # Send invite link to user
-                await send_invite_to_user(user_id)
-                
-                # Update admin message
+                await send_approval_notice(user_id)
+
                 await callback.message.edit_text(
-                    f"✅ User {user_id} has been approved!\n\n"
-                    f"An invite link has been sent to the user."
+                    f"✅ User {user_id} has been approved.\n\n"
+                    f"They were notified in private chat. The VIP invite is sent only after "
+                    f"they have an active subscription (or valid grace)."
                 )
                 
                 logger.info(f"Admin approved user {user_id} via button")
@@ -963,6 +962,8 @@ async def simulate_payment_command(message: Message) -> None:
         gateway = build_payment_gateway()
         webhook = WebhookService(db, gateway)
         ok = webhook.process_mock_event(event_type=event_type, user_id=user_id)
+        if ok and _bot_instance and event_type in ("payment.succeeded", "subscription.renewed"):
+            await notify_vip_invite_if_eligible(_bot_instance, user_id)
         if ok:
             await message.answer(f"✅ Simulated `{event_type}` for user `{user_id}`", parse_mode="Markdown")
         else:

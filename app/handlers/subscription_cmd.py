@@ -21,6 +21,7 @@ from services.subscription_readout import (
 )
 from services.payments.factory import build_payment_gateway
 from services.payments.webhook_service import WebhookService
+from services.vip_invite import notify_vip_invite_if_eligible
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ async def handle_subscribe_or_renew(message: Message) -> None:
                     "✅ Mock payment applied. Your subscription has been updated.\n"
                     "Use /subscription to see details."
                 )
+                await notify_vip_invite_if_eligible(message.bot, user_id)
             else:
                 await message.answer(
                     "❌ Mock activation failed. Please try again or contact an admin."

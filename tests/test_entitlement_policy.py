@@ -111,6 +111,14 @@ class EntitlementMatrixTests(unittest.TestCase):
         self.assertEqual(e.decision, "DENY")
         self.assertEqual(e.reason, "subscription_cancelled")
 
+    def test_approved_inactive_deny(self):
+        sub = _subscription(status=SubscriptionStatus.INACTIVE)
+        u = _user("APPROVED", sub)
+        with self.enforced:
+            e = EntitlementPolicy().explain_question_entitlement(u)
+        self.assertEqual(e.decision, "DENY")
+        self.assertEqual(e.reason, "subscription_inactive")
+
     def test_pending_approval_active_sub_deny(self):
         sub = _subscription(
             status=SubscriptionStatus.ACTIVE,
@@ -176,13 +184,13 @@ class EnforcementOffRowTests(unittest.TestCase):
         self.assertEqual(e.reason, "enforcement_disabled")
         self.assertTrue(e.allows_questions)
 
-    def test_no_subscription_grandfather_when_enforcement_off(self):
+    def test_no_subscription_denies_when_enforcement_off(self):
         u = _user("APPROVED", None)
         with self.unenforced:
             e = EntitlementPolicy().explain_question_entitlement(u)
-        self.assertEqual(e.decision, "ALLOW")
-        self.assertEqual(e.reason, "enforcement_disabled")
-        self.assertTrue(e.allows_questions)
+        self.assertEqual(e.decision, "DENY")
+        self.assertEqual(e.reason, "no_subscription")
+        self.assertFalse(e.allows_questions)
 
 
 if __name__ == "__main__":

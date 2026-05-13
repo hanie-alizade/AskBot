@@ -87,19 +87,15 @@ def setup_bot_instance(bot: Bot) -> None:
     _bot_instance = bot
 
 
-@router.message(
-    F.chat.type == ChatType.PRIVATE,
-    F.text,
-    ~F.command(),
-    F.from_user.id != config.admin_id
-)
-async def handle_private_question(message: Message) -> None:
-    """Handle private messages/questions from users (excluding admin messages)."""
-    user_id = message.from_user.id
-    
+async def process_private_question_submission(
+    message: Message, user_id: int, question_text: str
+) -> None:
+    """
+    Full private-question pipeline (entitlement, validation, limits, persist, admin forward).
+    Used for normal private messages and for VIP group → Yes callback forwarding.
+    """
     db = SessionLocal()
     try:
-        # Check if user is approved
         user = get_user(db, user_id)
         if not user:
             await message.answer(
@@ -109,7 +105,7 @@ async def handle_private_question(message: Message) -> None:
             )
             logger.info(f"Unregistered user {user_id} tried to send question")
             return
-        
+
         expl = policy.explain_question_entitlement(user)
         log_entitlement_decision(logger, expl, user_id)
 
@@ -123,13 +119,11 @@ async def handle_private_question(message: Message) -> None:
                 expl.reason,
             )
             return
-        
-        # Validate question content
-        question_text = message.text or ""
-        if not await validate_question_content(question_text, message):
+
+        qt = question_text or ""
+        if not await validate_question_content(qt, message):
             return
-        
-        # Check cooldown
+
         if not check_question_cooldown(db, user_id):
             await message.answer(
                 "⏳ **Please Wait**\n\n"
@@ -137,24 +131,21 @@ async def handle_private_question(message: Message) -> None:
             )
             logger.info(f"User {user_id} on cooldown, question rejected")
             return
-        
-        # Check for duplicate questions
-        duplicate = check_duplicate_question(db, user_id, question_text)
+
+        duplicate = check_duplicate_question(db, user_id, qt)
         if duplicate:
             await message.answer(
                 "⚠️ **Duplicate Question**\n\n"
                 "You already sent this question recently."
             )
-            logger.info(f"Duplicate question from user {user_id}: '{question_text[:50]}...'")
+            logger.info(f"Duplicate question from user {user_id}: '{qt[:50]}...'")
             return
-        
-        # Check question limit
+
         if not await check_question_limit(user, message):
             return
-        
-        # Create question record and accept it
-        await accept_question(message, user_id)
-        
+
+        await accept_question(message, user_id, qt)
+
     except Exception as e:
         logger.error(f"Error processing question from user {user_id}: {e}")
         await message.answer(
@@ -163,6 +154,19 @@ async def handle_private_question(message: Message) -> None:
         )
     finally:
         db.close()
+
+
+@router.message(
+    F.chat.type == ChatType.PRIVATE,
+    F.text,
+    ~F.command(),
+    F.from_user.id != config.admin_id
+)
+async def handle_private_question(message: Message) -> None:
+    """Handle private messages/questions from users (excluding admin messages)."""
+    await process_private_question_submission(
+        message, message.from_user.id, message.text or ""
+    )
 
 
 async def check_question_limit(user, message: Message) -> bool:
@@ -185,7 +189,7 @@ async def check_question_limit(user, message: Message) -> bool:
         return False
 
 
-async def accept_question(message: Message, user_id: int) -> None:
+async def accept_question(message: Message, user_id: int, question_text: str) -> None:
     """Accept and process the user's question with proper tracking."""
     
     db = SessionLocal()
@@ -204,7 +208,7 @@ async def accept_question(message: Message, user_id: int) -> None:
         question = create_question(
             db,
             user_id=user_id,
-            question_text=message.text
+            question_text=question_text,
         )
         
         if not question:
@@ -251,7 +255,7 @@ async def accept_question(message: Message, user_id: int) -> None:
         
         # Try to forward to admin - if this fails, rollback user confirmation
         try:
-            await forward_question_to_admin(message, user, question, db)
+            await forward_question_to_admin(message, user, question, db, question_text=question_text)
         except Exception as admin_error:
             logger.error(f"Failed to forward question {question.id} to admin: {admin_error}")
             db.rollback()
@@ -276,7 +280,9 @@ async def accept_question(message: Message, user_id: int) -> None:
         db.close()
 
 
-async def forward_question_to_admin(message: Message, user, question, db) -> None:
+async def forward_question_to_admin(
+    message: Message, user, question, db, *, question_text: str
+) -> None:
     """Forward user question to admin with question details using persistent session."""
     try:
         if not _bot_instance:
@@ -287,13 +293,13 @@ async def forward_question_to_admin(message: Message, user, question, db) -> Non
         username_display = f"@{user.username}" if user.username else "No username"
         
         admin_message = (
-            f"� **QUESTION #{question.id}**\n\n"
+            f"**QUESTION #{question.id}**\n\n"
             f"👤 **From:** {user.first_name} (@{user.username or 'no username'})\n"
             f"🆔 **User ID:** `{user.telegram_id}`\n"
             f"📊 **Status:** {user.status} | Questions: {user.questions_used}/{user.question_limit}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"💬 **Question:**\n"
-            f"{message.text}\n\n"
+            f"{question_text}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"💡 *Reply to this message to respond*"
         )
