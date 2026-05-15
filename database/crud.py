@@ -6,10 +6,11 @@ Handles Create, Read, Update, Delete operations for users.
 import logging
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 from typing import Optional, List
 
 from .models import User, Question
+from .models_subscription import Payment, Subscription
 
 logger = logging.getLogger(__name__)
 
@@ -406,34 +407,48 @@ def update_question_status(db: Session, question_id: int, status: str) -> bool:
 
 
 
-# TODO: remove in production if not needed
 def reset_user_completely(db: Session, telegram_id: int) -> bool:
-    """Completely reset user data for testing purposes."""
+    """
+    Permanently remove this Telegram user and all related data (payments,
+    subscriptions, questions). After success, get_user returns None until they
+    use /start again and a fresh row is created.
+    """
     try:
-        # Find the user
         user = db.query(User).filter(User.telegram_id == telegram_id).first()
         if not user:
             logger.error(f"User {telegram_id} not found for reset")
             return False
-        
-        # Delete all questions from this user first (avoid foreign key errors)
-        from .models import Question
-        deleted_questions = db.query(Question).filter(Question.user_id == user.id).delete()
-        logger.info(f"Deleted {deleted_questions} questions for user {telegram_id}")
-        
-        # Reset user fields to initial state
-        user.status = "NEW"
-        user.approved_at = None
-        user.questions_used = 0
-        user.question_limit = 5  # Reset to default
-        user.last_question_date = None
-        
+
+        # FK order: payments reference subscriptions; both reference users.telegram_id
+        pay_deleted = (
+            db.query(Payment)
+            .filter(Payment.user_id == telegram_id)
+            .delete(synchronize_session=False)
+        )
+        sub_deleted = (
+            db.query(Subscription)
+            .filter(Subscription.user_id == telegram_id)
+            .delete(synchronize_session=False)
+        )
+        # Question.user_id stores telegram_id (see create_question / handlers)
+        q_deleted = (
+            db.query(Question)
+            .filter(Question.user_id == telegram_id)
+            .delete(synchronize_session=False)
+        )
+
+        db.delete(user)
         db.commit()
-        db.refresh(user)
-        
-        logger.info(f"Admin reset user {telegram_id} completely")
+        logger.info(
+            "reset_user_completely telegram_id=%s deleted user row; "
+            "payments=%s subscriptions=%s questions=%s",
+            telegram_id,
+            pay_deleted,
+            sub_deleted,
+            q_deleted,
+        )
         return True
-        
+
     except Exception as e:
         logger.error(f"Error resetting user {telegram_id}: {e}")
         db.rollback()
@@ -470,3 +485,117 @@ def reject_user(db: Session, telegram_id: int, reason: str = "Access denied") ->
         logger.error(f"Error rejecting user {telegram_id}: {e}")
         db.rollback()
         return False
+
+
+# --- Admin panel & reporting helpers ---
+
+
+def append_webhook_processing_log(
+    db: Session,
+    *,
+    user_id: Optional[int],
+    event_type: Optional[str],
+    success: bool,
+    detail: str = "",
+    external_event_id: Optional[str] = None,
+) -> None:
+    """Append a row for admin-visible webhook / payment-event history."""
+    from database.models_webhook import WebhookProcessingLog
+
+    try:
+        row = WebhookProcessingLog(
+            user_id=user_id,
+            event_type=event_type,
+            success=success,
+            detail=(detail or "")[:4000],
+            external_event_id=external_event_id,
+        )
+        db.add(row)
+        db.commit()
+    except Exception as e:
+        logger.error("append_webhook_processing_log failed: %s", e)
+        db.rollback()
+
+
+def count_users_total(db: Session) -> int:
+    return int(db.query(func.count(User.id)).scalar() or 0)
+
+
+def list_users_paginated(db: Session, offset: int, limit: int = 6) -> List[User]:
+    return (
+        db.query(User)
+        .order_by(User.telegram_id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+
+def list_users_by_username_prefix(
+    db: Session, prefix: str, offset: int, limit: int = 6
+) -> tuple[List[User], int]:
+    pattern = f"{prefix}%"
+    base = db.query(User).filter(User.username.isnot(None), User.username.ilike(pattern))
+    total = int(base.count() or 0)
+    rows = base.order_by(User.username.asc()).offset(offset).limit(limit).all()
+    return rows, total
+
+
+def list_questions_paginated(
+    db: Session, *, status: Optional[str], offset: int, limit: int = 6
+) -> tuple[List[Question], int]:
+    base = db.query(Question)
+    if status:
+        base = base.filter(Question.status == status)
+    total = int(base.count() or 0)
+    rows = base.order_by(Question.created_at.desc()).offset(offset).limit(limit).all()
+    return rows, total
+
+
+def list_subscriptions_paginated(
+    db: Session, offset: int, limit: int = 6
+) -> tuple[List[Subscription], int]:
+    base = db.query(Subscription).order_by(Subscription.id.desc())
+    total = int(base.count() or 0)
+    rows = base.offset(offset).limit(limit).all()
+    return rows, total
+
+
+def list_payments_paginated(
+    db: Session, offset: int, limit: int = 6
+) -> tuple[List[Payment], int]:
+    base = db.query(Payment).order_by(Payment.id.desc())
+    total = int(base.count() or 0)
+    rows = base.offset(offset).limit(limit).all()
+    return rows, total
+
+
+def count_distinct_payment_users(db: Session) -> int:
+    return int(db.query(func.count(func.distinct(Payment.user_id))).scalar() or 0)
+
+
+def list_latest_payment_per_user_page(
+    db: Session, offset: int, limit: int = 6
+) -> List[Payment]:
+    subq = (
+        db.query(Payment.user_id.label("uid"), func.max(Payment.id).label("mid"))
+        .group_by(Payment.user_id)
+        .subquery()
+    )
+    q = (
+        db.query(Payment)
+        .join(subq, (Payment.user_id == subq.c.uid) & (Payment.id == subq.c.mid))
+        .order_by(Payment.id.desc())
+    )
+    return q.offset(offset).limit(limit).all()
+
+
+def list_webhook_logs_paginated(
+    db: Session, offset: int, limit: int = 6
+) -> tuple[List, int]:
+    from database.models_webhook import WebhookProcessingLog
+
+    base = db.query(WebhookProcessingLog).order_by(WebhookProcessingLog.id.desc())
+    total = int(base.count() or 0)
+    rows = base.offset(offset).limit(limit).all()
+    return rows, total

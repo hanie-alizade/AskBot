@@ -4,10 +4,12 @@ Creates and configures the Telegram bot instance.
 """
 
 import asyncio
+import contextlib
 import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from database.db import SessionLocal
 from .config import config
 
 
@@ -17,6 +19,26 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+async def _vip_membership_background_loop(bot_instance: Bot) -> None:
+    """Reconcile VIP group bans with subscription state (removal delay + renewal unban)."""
+    interval = max(5, int(config.vip_membership_sync_interval_seconds))
+    while True:
+        try:
+            if config.vip_group_id:
+                db = SessionLocal()
+                try:
+                    from services.vip_membership import reconcile_vip_group_membership
+
+                    await reconcile_vip_group_membership(bot_instance, db)
+                finally:
+                    db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("VIP membership sync failed: %s", e, exc_info=True)
+        await asyncio.sleep(interval)
 
 
 # Create bot instance with default properties
@@ -39,20 +61,31 @@ async def setup_bot() -> None:
     logger.info("Setting up bot handlers...")
     
     # Import and register handlers here
-    from .handlers import start, verify, access, admin, group_moderation, questions
-    
+    from .handlers import start, verify, access, subscription_cmd, admin, group_moderation, questions, admin_panel, language
+
     # Register all routers (order matters - first matching handler wins)
     logger.info("Registering routers in order:")
-    
+
+    logger.info("0. admin_panel.router (admin /start + menus)")
+    dp.include_router(admin_panel.router)
+
     # Group moderation should come first for group messages
     logger.info("1. group_moderation.router")
     dp.include_router(group_moderation.router)
-    
+
+    # Language router handles /language + lang:* callbacks.
+    # Placed before verify so the lang:* callback resolves here, but it does
+    # NOT claim /start — verify.router still owns the start flow.
+    logger.info("1b. language.router")
+    dp.include_router(language.router)
+
     # Command handlers should come before generic handlers
     logger.info("2. verify.router")
     dp.include_router(verify.router)
     logger.info("3. access.router")
     dp.include_router(access.router)
+    logger.info("3b. subscription_cmd.router")
+    dp.include_router(subscription_cmd.router)
     logger.info("4. admin.router")
     dp.include_router(admin.router)
     logger.info("5. start.router")
@@ -66,6 +99,7 @@ async def setup_bot() -> None:
     
     # Pass bot instance to handlers for sending messages
     admin.setup_bot_instance(bot)
+    admin_panel.setup_bot_instance(bot)
     access.setup_bot_instance(bot)
     group_moderation.setup_bot_instance(bot)
     questions.setup_bot_instance(bot)
@@ -82,19 +116,25 @@ async def start_bot() -> None:
     max_retries = 3
     retry_delay = 5
     
-    for attempt in range(max_retries):
-        try:
-            await dp.start_polling(bot)
-            break
-        except Exception as e:
-            if attempt < max_retries - 1:
-                logger.warning(f"Bot startup failed (attempt {attempt + 1}/{max_retries}): {e}")
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-            else:
-                logger.error(f"Failed to start bot after {max_retries} attempts: {e}")
-                raise
+    vip_sync_task = asyncio.create_task(_vip_membership_background_loop(bot))
+    try:
+        for attempt in range(max_retries):
+            try:
+                await dp.start_polling(bot)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Bot startup failed (attempt {attempt + 1}/{max_retries}): {e}")
+                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    logger.error(f"Failed to start bot after {max_retries} attempts: {e}")
+                    raise
+    finally:
+        vip_sync_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await vip_sync_task
 
 
 async def stop_bot() -> None:
