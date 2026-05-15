@@ -4,13 +4,18 @@ Handles the initial verification step for new users.
 """
 
 import logging
-from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from typing import Optional, Tuple
+
+from aiogram import F, Router
 from aiogram.filters import Command
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+
 from database.crud import create_user, get_user, update_user_status
 from database.db import SessionLocal
-from ..config import config
 from services.entitlement_policy import EntitlementPolicy
+from services.i18n import t_user
+
+from ..config import config
 
 logger = logging.getLogger(__name__)
 
@@ -18,259 +23,244 @@ router = Router()
 _entitlement = EntitlementPolicy()
 
 
+# --------------------------------------------------------------------------- #
+# Welcome-screen builders (also called from app/handlers/language.py after a
+# language pick, so each one accepts the User and returns a fully-translated
+# (text, keyboard) tuple — no inline strings).
+# --------------------------------------------------------------------------- #
+
+
+def _welcome_new(user) -> Tuple[str, InlineKeyboardMarkup]:
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t_user(user, "btn.verify"), callback_data="verify_user")],
+        [InlineKeyboardButton(text=t_user(user, "btn.check_status"), callback_data="check_status")],
+        [InlineKeyboardButton(text=t_user(user, "btn.help"), callback_data="show_help")],
+    ])
+    return t_user(user, "verify.welcome_new"), keyboard
+
+
+def _welcome_verified(user) -> Tuple[str, InlineKeyboardMarkup]:
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t_user(user, "btn.request_access"), callback_data="request_access")],
+        [InlineKeyboardButton(text=t_user(user, "btn.check_status"), callback_data="check_status")],
+        [InlineKeyboardButton(text=t_user(user, "btn.help"), callback_data="show_help")],
+    ])
+    return t_user(user, "verify.welcome_verified"), keyboard
+
+
+def _welcome_pending(user) -> Tuple[str, InlineKeyboardMarkup]:
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t_user(user, "btn.check_status"), callback_data="check_status")],
+        [InlineKeyboardButton(text=t_user(user, "btn.help"), callback_data="show_help")],
+    ])
+    return t_user(user, "verify.welcome_pending"), keyboard
+
+
+def _welcome_approved(
+    user, *, can_vip: bool, vip_link: Optional[str] = None
+) -> Tuple[str, InlineKeyboardMarkup]:
+    if can_vip:
+        url = vip_link or config.group_invite_link
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t_user(user, "btn.join_vip"), url=url)],
+            [InlineKeyboardButton(text=t_user(user, "btn.check_status"), callback_data="check_status")],
+            [InlineKeyboardButton(text=t_user(user, "btn.help"), callback_data="show_help")],
+        ])
+        return t_user(user, "verify.welcome_approved_vip"), keyboard
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t_user(user, "btn.subscription"), callback_data="check_status")],
+        [InlineKeyboardButton(text=t_user(user, "btn.help"), callback_data="show_help")],
+    ])
+    return t_user(user, "verify.welcome_approved_no_sub"), keyboard
+
+
+async def send_welcome_for_status(message: Message, user) -> None:
+    """
+    Send the appropriate welcome screen for the user's current state, then
+    install/refresh the persistent 3-button reply keyboard.
+
+    Re-used by the language picker callback so the menu labels are always in
+    the user's current language. Sent as a second message because a single
+    Telegram message can carry only one reply_markup (inline OR reply keyboard).
+    """
+    status = user.status
+    if status == "NEW":
+        text, kb = _welcome_new(user)
+    elif status == "VERIFIED":
+        text, kb = _welcome_verified(user)
+    elif status == "PENDING_APPROVAL":
+        text, kb = _welcome_pending(user)
+    elif status == "APPROVED":
+        # Need a fresh session to check entitlement without crossing the caller's session.
+        db = SessionLocal()
+        try:
+            fresh = get_user(db, user.telegram_id) or user
+            can_vip = _entitlement.explain_question_entitlement(fresh).allows_questions
+        finally:
+            db.close()
+        vip_link: Optional[str] = None
+        if can_vip:
+            # Fresh single-use link per /start so leaked links die on first use.
+            from services.vip_invite import get_personal_invite_link
+
+            vip_link = await get_personal_invite_link(message.bot, user.telegram_id)
+        text, kb = _welcome_approved(user, can_vip=can_vip, vip_link=vip_link)
+    else:
+        return
+
+    await message.answer(text, reply_markup=kb)
+
+    # Lazy import to avoid the language ↔ verify cycle.
+    from .language import build_reply_menu
+
+    lang = getattr(user, "language", None)
+    await message.answer(
+        t_user(user, "menu.installed"),
+        reply_markup=build_reply_menu(lang),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# /start
+# --------------------------------------------------------------------------- #
+
+
 @router.message(Command("start"))
 async def handle_start(message: Message) -> None:
-    """Handle /start command based on user state."""
+    """Handle /start. First-time users see the language picker; all others see status-based welcome."""
     user_id = message.from_user.id
-    
+
     logger.info(f"🚀 START command triggered by user {user_id}")
-    
-    # Get or create user in database
+
     db = SessionLocal()
     try:
         user = get_user(db, user_id)
         if not user:
             user = create_user(
-                db, 
+                db,
                 telegram_id=user_id,
                 username=message.from_user.username,
-                first_name=message.from_user.full_name
+                first_name=message.from_user.full_name,
             )
-        
-        logger.info(f"User {user_id} sent /start command. Current state: {user.status}")
-        
-        if user.status == "NEW":
-            await handle_new_user(message, user)
-        elif user.status == "VERIFIED":
-            await handle_verified_user(message, user)
-        elif user.status == "PENDING_APPROVAL":
-            await handle_pending_user(message, user)
-        elif user.status == "APPROVED":
-            await handle_approved_user(message, user)
-    finally:
-        db.close()
 
+        # First-time language gate: a NULL `language` column means the user has
+        # never picked. Existing users were backfilled to 'en' by the migration,
+        # so they bypass this and continue normally.
+        if not user.language:
+            from .language import send_first_time_picker
 
-async def handle_new_user(message: Message, user) -> None:
-    """Handle new user - show welcome message and verification button."""
-    user_id = message.from_user.id
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Verify", callback_data="verify_user")],
-        [InlineKeyboardButton(text="📊 Check Status", callback_data="check_status")],
-        [InlineKeyboardButton(text="❓ Help", callback_data="show_help")]
-    ])
-    
-    await message.answer(
-        "👋 Welcome to AskBot!\n\n"
-        "To get started, please verify your account by clicking the button below.",
-        reply_markup=keyboard
-    )
-    
-    logger.info(f"Sent welcome message to new user {user_id}")
-
-
-async def handle_verified_user(message: Message, user) -> None:
-    """Handle already verified user - show access request option."""
-    user_id = message.from_user.id
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔑 Request Access", callback_data="request_access")],
-        [InlineKeyboardButton(text="📊 Check Status", callback_data="check_status")],
-        [InlineKeyboardButton(text="❓ Help", callback_data="show_help")]
-    ])
-    
-    await message.answer(
-        "✅ You are verified!\n\n"
-        "You can now request access to the VIP group by clicking the button below.",
-        reply_markup=keyboard
-    )
-    
-    logger.info(f"Sent verified message to user {user_id}")
-
-
-async def handle_pending_user(message: Message, user) -> None:
-    """Handle user with pending approval."""
-    user_id = message.from_user.id
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Check Status", callback_data="check_status")],
-        [InlineKeyboardButton(text="❓ Help", callback_data="show_help")]
-    ])
-    
-    await message.answer(
-        "⏳ Your access request is currently under review.\n\n"
-        "Please wait for an admin to approve your request. "
-        "You'll be notified once a decision is made.",
-        reply_markup=keyboard
-    )
-    
-    logger.info(f"Sent pending message to user {user_id}")
-
-
-async def handle_approved_user(message: Message, user) -> None:
-    """Approved user: VIP join link only when subscription entitles them."""
-    user_id = message.from_user.id
-
-    db = SessionLocal()
-    try:
-        fresh = get_user(db, user_id)
-        if not fresh:
+            logger.info("First-time language picker shown to user %s", user_id)
+            await send_first_time_picker(message)
             return
-        can_vip = _entitlement.explain_question_entitlement(fresh).allows_questions
+
+        logger.info(f"User {user_id} sent /start. State: {user.status} lang: {user.language}")
+        await send_welcome_for_status(message, user)
     finally:
         db.close()
 
-    if can_vip:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🎉 Join VIP Group", url=config.group_invite_link)],
-                [InlineKeyboardButton(text="📊 Check Status", callback_data="check_status")],
-                [InlineKeyboardButton(text="❓ Help", callback_data="show_help")],
-            ]
-        )
-        await message.answer(
-            "You are approved and your subscription is active.\n\n"
-            "Use the button below to open the VIP group invite.",
-            reply_markup=keyboard,
-        )
-    else:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📊 Subscription", callback_data="check_status")],
-                [InlineKeyboardButton(text="❓ Help", callback_data="show_help")],
-            ]
-        )
-        await message.answer(
-            "You are approved. Activate a subscription to get the VIP group invite.\n\n"
-            "Use /subscription and /subscribe (or /renew) in private chat with this bot.",
-            reply_markup=keyboard,
-        )
 
-    logger.info("Sent approved-user message to %s (vip_eligible=%s)", user_id, can_vip)
+# --------------------------------------------------------------------------- #
+# Inline-button callbacks
+# --------------------------------------------------------------------------- #
 
 
 @router.callback_query(F.data == "verify_user")
 async def handle_verify_callback(callback: CallbackQuery) -> None:
     """Handle verification button click."""
     user_id = callback.from_user.id
-    
+
     db = SessionLocal()
     try:
         user = get_user(db, user_id)
         if not user or user.status != "NEW":
-            await callback.answer("❌ You are already verified!", show_alert=True)
+            await callback.answer(
+                t_user(user, "verify.alert_already_verified"),
+                show_alert=True,
+            )
             return
-        
-        # Mark user as verified
+
         update_user_status(db, user_id, "VERIFIED")
-        
-        # Create keyboard for access request
+        # Refresh to read updated status with the same language.
+        user = get_user(db, user_id)
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔑 Request Access", callback_data="request_access")]
+            [InlineKeyboardButton(text=t_user(user, "btn.request_access"), callback_data="request_access")],
         ])
-        
+
         await callback.message.edit_text(
-            "✅ Verification complete!\n\n"
-            "You can now request access to VIP group by clicking the button below.",
-            reply_markup=keyboard
+            t_user(user, "verify.complete"),
+            reply_markup=keyboard,
         )
-        
-        await callback.answer("✅ Successfully verified!")
+
+        await callback.answer(t_user(user, "verify.alert_success"))
         logger.info(f"User {user_id} completed verification")
     finally:
         db.close()
+
+
+_STATUS_KEY = {
+    "NEW": "status.new",
+    "VERIFIED": "status.verified",
+    "PENDING_APPROVAL": "status.pending",
+    "APPROVED": "status.approved",
+    "REJECTED": "status.rejected",
+}
 
 
 @router.callback_query(F.data == "check_status")
 async def handle_status_callback(callback: CallbackQuery) -> None:
     """Handle status button click."""
     user_id = callback.from_user.id
-    
+
     db = SessionLocal()
     try:
         user = get_user(db, user_id)
         if not user:
-            # User not found - show informational message
-            await callback.message.answer(
-                "📊 Your Current Status: ❓ Not Registered\n\n"
-                "You haven't started the verification process yet.\n\n"
-                "👉 Please click the **'✅ Verify'** button to begin the registration process."
-            )
+            await callback.message.answer(t_user(None, "status.not_registered_callback"))
             logger.info(f"User {user_id} checked status but not found in database")
         else:
-            # User found - show their actual status
-            status_messages = {
-                "NEW": "🆕 New User - Please verify your account",
-                "VERIFIED": "✅ Verified - You can request access",
-                "PENDING_APPROVAL": "⏳ Pending Approval - Your request is under review",
-                "APPROVED": "🎉 Approved - You have access to the VIP group",
-                "REJECTED": "❌ Rejected - Your access request has been denied"
-            }
-            
-            status_text = status_messages.get(user.status, "❓ Unknown Status")
-            
+            status_key = _STATUS_KEY.get(user.status, "status.unknown")
+            status_text = t_user(user, status_key)
             await callback.message.answer(
-                f"📊 Your Current Status: {status_text}"
+                t_user(user, "status.label", status=status_text)
             )
-            
             logger.info(f"User {user_id} checked their status via button: {user.status}")
     finally:
         db.close()
-    
+
     await callback.answer()
+
+
+_HELP_KEY = {
+    "NEW": "help.new",
+    "VERIFIED": "help.verified",
+    "PENDING_APPROVAL": "help.pending",
+    "APPROVED": "help.approved_with_vip",
+}
 
 
 @router.callback_query(F.data == "show_help")
 async def handle_help_callback(callback: CallbackQuery) -> None:
     """Handle help button click."""
     user_id = callback.from_user.id
-    
+
     db = SessionLocal()
     try:
         user = get_user(db, user_id)
         if not user:
-            # Create user if they don't exist
             user = create_user(
                 db,
                 telegram_id=user_id,
                 username=callback.from_user.username,
-                first_name=callback.from_user.full_name
+                first_name=callback.from_user.full_name,
             )
-        
-        help_text = "🤖 AskBot Help\n\n"
-        
-        if user.status == "NEW":
-            help_text += "Available commands:\n"
-            help_text += "/start - Begin verification process\n"
-            help_text += "/help - Show this help message\n"
-            help_text += "/status - Check your current status\n\n"
-            help_text += "Click the 'Verify' button to get started!"
-        
-        elif user.status == "VERIFIED":
-            help_text += "Available commands:\n"
-            help_text += "/start - Show access request option\n"
-            help_text += "/help - Show this help message\n"
-            help_text += "/status - Check your current status\n\n"
-            help_text += "Click the 'Request Access' button to continue!"
-        
-        elif user.status == "PENDING_APPROVAL":
-            help_text += "Available commands:\n"
-            help_text += "/start - Show pending status\n"
-            help_text += "/help - Show this help message\n"
-            help_text += "/status - Check your current status\n\n"
-            help_text += "Your request is under review. Please wait for admin approval."
-        
-        elif user.status == "APPROVED":
-            help_text += "Available commands:\n"
-            help_text += "/start - Show approved status\n"
-            help_text += "/help - Show this help message\n"
-            help_text += "/status - Check your current status\n\n"
-            help_text += "You have access to the VIP group! Check your messages for the invite link."
-        
+
+        body_key = _HELP_KEY.get(user.status, "help.new")
+        help_text = t_user(user, "help.title") + t_user(user, body_key)
         await callback.message.answer(help_text)
         logger.info(f"User {user_id} requested help via button: {user.status}")
     finally:
         db.close()
-    
+
     await callback.answer()

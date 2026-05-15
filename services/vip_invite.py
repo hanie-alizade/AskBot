@@ -5,19 +5,26 @@ VIP group invite: only users who pass entitlement (APPROVED + ACTIVE or GRACE) g
 import logging
 import secrets
 import time
+from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from app.config import config
 from database.crud import get_user
 from database.db import SessionLocal
 from services.entitlement_policy import EntitlementPolicy
+from services.i18n import t, t_user
+from services.vip_membership import unban_vip_group_member
 
 logger = logging.getLogger(__name__)
 
 _policy = EntitlementPolicy()
+
+# Personal invite link: single-use, 30-day expiry. Generated fresh per send so
+# leaked/forwarded links become useless the moment anyone else uses them.
+_PERSONAL_LINK_TTL_DAYS = 30
 
 # token -> (telegram_user_id, question_text, monotonic_created)
 _PENDING_GROUP_QUESTIONS: Dict[str, Tuple[int, str, float]] = {}
@@ -60,20 +67,82 @@ def take_pending_group_question(token: str, user_id: int) -> Optional[str]:
     return text
 
 
-def build_vip_invite_message() -> str:
-    return (
-        "🎉 Your subscription is active.\n\n"
-        "You can join the VIP group using this invite link:\n\n"
-        f"{config.group_invite_link}\n\n"
-        "Welcome to the community."
-    )
+async def get_personal_invite_link(bot: Bot, telegram_id: int) -> Optional[str]:
+    """
+    Create a single-use, ~30-day VIP invite link tied to one Telegram user.
+
+    Returns the URL on success, or None if the bot can't create a link
+    (no `VIP_GROUP_ID` configured, missing admin rights, API error). Callers
+    should fall back to `config.group_invite_link` only as a last resort.
+    """
+    if not config.vip_group_id:
+        return None
+    expire_at = int((datetime.utcnow() + timedelta(days=_PERSONAL_LINK_TTL_DAYS)).timestamp())
+    try:
+        link = await bot.create_chat_invite_link(
+            chat_id=config.vip_group_id,
+            name=f"vip_user_{telegram_id}",
+            expire_date=expire_at,
+            member_limit=1,
+        )
+        logger.info(
+            "personal_invite_link created telegram_id=%s expires_at=%s",
+            telegram_id,
+            expire_at,
+        )
+        return link.invite_link
+    except TelegramBadRequest as e:
+        # Most common cause: bot lacks "Invite Users via Link" admin right.
+        logger.error(
+            "create_chat_invite_link failed telegram_id=%s err=%s "
+            "(does the bot have 'Invite Users via Link' admin right?)",
+            telegram_id,
+            e,
+        )
+        return None
+    except Exception as e:
+        logger.error("create_chat_invite_link unexpected error telegram_id=%s err=%s", telegram_id, e)
+        return None
+
+
+def build_vip_invite_message(lang: Optional[str] = None, link: Optional[str] = None) -> str:
+    """Render the localized VIP invite DM. Caller supplies the URL."""
+    url = link or config.group_invite_link
+    return t(lang, "vip.invite", link=url)
 
 
 async def send_vip_group_invite(bot: Bot, telegram_id: int) -> bool:
-    """Send the private VIP invite link. Returns False if the user blocked the bot."""
+    """Send the private VIP invite link. Returns False if the user blocked the bot.
+
+    Always tries to mint a fresh per-user single-use link; falls back to the
+    static env link only if the API call fails.
+    """
+    db = SessionLocal()
     try:
-        await bot.send_message(chat_id=telegram_id, text=build_vip_invite_message())
-        logger.info("vip_invite sent telegram_id=%s", telegram_id)
+        user = get_user(db, telegram_id)
+        lang = getattr(user, "language", None) if user else None
+    finally:
+        db.close()
+
+    personal_link = await get_personal_invite_link(bot, telegram_id)
+    if not personal_link:
+        logger.warning(
+            "vip_invite falling back to static GROUP_INVITE_LINK for telegram_id=%s "
+            "(personal link generation failed)",
+            telegram_id,
+        )
+
+    try:
+        await bot.send_message(
+            chat_id=telegram_id,
+            text=build_vip_invite_message(lang, link=personal_link),
+        )
+        logger.info(
+            "vip_invite sent telegram_id=%s lang=%s personal=%s",
+            telegram_id,
+            lang,
+            bool(personal_link),
+        )
         return True
     except TelegramForbiddenError:
         logger.warning("vip_invite blocked or chat closed telegram_id=%s", telegram_id)
@@ -92,6 +161,15 @@ async def notify_vip_invite_if_eligible(bot: Bot, telegram_id: int) -> None:
             return
         if not _policy.explain_question_entitlement(user).allows_questions:
             return
-        await send_vip_group_invite(bot, telegram_id)
+        # Always try to lift any existing VIP-group ban before sending the invite.
+        # only_if_banned=True makes this a safe no-op when the user isn't banned.
+        if await unban_vip_group_member(bot, telegram_id):
+            if user.vip_billing_removal_at is not None:
+                user.vip_billing_removal_at = None
+                db.commit()
+        sent = await send_vip_group_invite(bot, telegram_id)
+        if sent:
+            user.vip_invite_sent_at = datetime.utcnow()
+            db.commit()
     finally:
         db.close()

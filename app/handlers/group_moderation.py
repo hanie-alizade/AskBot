@@ -14,11 +14,22 @@ from database.crud import get_user
 from database.db import SessionLocal
 from ..config import config
 from services.entitlement_policy import EntitlementPolicy
+from services.i18n import t_user
 from services.vip_invite import (
     store_pending_group_question,
     discard_pending_group_question,
     take_pending_group_question,
 )
+from services.vip_membership import ensure_vip_group_candidate_tracked
+
+
+def _lookup_user_lang(user_id: int):
+    """Return the User row (for `t_user`) or None. Each DM opens its own session."""
+    db = SessionLocal()
+    try:
+        return get_user(db, user_id)
+    finally:
+        db.close()
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +62,11 @@ async def delete_user_message(message: Message) -> None:
 async def send_private_subscription_required(user_id: int) -> None:
     if not _bot_instance:
         return
+    user = _lookup_user_lang(user_id)
     try:
         await _bot_instance.send_message(
             chat_id=user_id,
-            text=(
-                "Your message in the VIP group was removed (announcements only).\n\n"
-                "You need an active subscription to forward questions from the group. "
-                "Use /subscription to check status, then /subscribe or /renew when eligible."
-            ),
+            text=t_user(user, "group.private_subscription_required"),
         )
     except TelegramForbiddenError:
         logger.warning("Cannot DM user %s (blocked or no chat)", user_id)
@@ -70,14 +78,11 @@ async def send_private_redirect_unapproved(user_id: int) -> None:
     """Notify non-approved users after their group message was removed."""
     if not _bot_instance:
         return
+    user = _lookup_user_lang(user_id)
     try:
         await _bot_instance.send_message(
             chat_id=user_id,
-            text=(
-                "Your message in the VIP group was removed to keep the channel clean.\n\n"
-                "Please use private chat with this bot to continue onboarding or ask questions "
-                "once you are approved and subscribed."
-            ),
+            text=t_user(user, "group.private_redirect_unapproved"),
         )
     except TelegramForbiddenError:
         logger.warning("Cannot DM user %s", user_id)
@@ -89,12 +94,13 @@ async def send_group_forward_offer(user_id: int, question_text: str) -> None:
     """Ask whether to send the removed group line to the admin (private)."""
     if not _bot_instance:
         return
+    user = _lookup_user_lang(user_id)
     token = store_pending_group_question(user_id, question_text)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Yes", callback_data=f"grpq:y:{token}"),
-                InlineKeyboardButton(text="No", callback_data=f"grpq:n:{token}"),
+                InlineKeyboardButton(text=t_user(user, "group.btn_yes"), callback_data=f"grpq:y:{token}"),
+                InlineKeyboardButton(text=t_user(user, "group.btn_no"), callback_data=f"grpq:n:{token}"),
             ]
         ]
     )
@@ -104,11 +110,7 @@ async def send_group_forward_offer(user_id: int, question_text: str) -> None:
     try:
         await _bot_instance.send_message(
             chat_id=user_id,
-            text=(
-                "Your message in the VIP group was removed (announcements only).\n\n"
-                "Would you like to send this question to the admin instead?\n\n"
-                f"—\n{preview}"
-            ),
+            text=t_user(user, "group.forward_offer", preview=preview),
             reply_markup=keyboard,
         )
     except TelegramForbiddenError:
@@ -120,13 +122,11 @@ async def send_group_forward_offer(user_id: int, question_text: str) -> None:
 async def send_non_text_group_notice(user_id: int) -> None:
     if not _bot_instance:
         return
+    user = _lookup_user_lang(user_id)
     try:
         await _bot_instance.send_message(
             chat_id=user_id,
-            text=(
-                "Your post in the VIP group was removed. Only text can be forwarded as a question.\n\n"
-                "Send your question in private chat with this bot if you need help."
-            ),
+            text=t_user(user, "group.non_text_notice"),
         )
     except Exception:
         pass
@@ -148,6 +148,8 @@ async def _handle_vip_group_user_message(message: Message, *, has_text: bool) ->
             await send_private_redirect_unapproved(uid)
             logger.info("VIP group message removed (not approved) user=%s", uid)
             return
+
+        ensure_vip_group_candidate_tracked(db, user)
 
         entitled = _policy.explain_question_entitlement(user).allows_questions
 
@@ -221,10 +223,11 @@ async def handle_group_question_callback(callback: CallbackQuery) -> None:
 
     action, token = parts[1], parts[2]
     uid = callback.from_user.id
+    user = _lookup_user_lang(uid)
 
     if action == "n":
         discard_pending_group_question(token, uid)
-        await callback.answer("Cancelled")
+        await callback.answer(t_user(user, "group.offer_cancelled_toast"))
         if callback.message:
             try:
                 await callback.message.edit_reply_markup(reply_markup=None)
@@ -248,7 +251,7 @@ async def handle_group_question_callback(callback: CallbackQuery) -> None:
         if _bot_instance and callback.message:
             await _bot_instance.send_message(
                 chat_id=uid,
-                text="That offer expired. Please send your question again from the group or in private chat.",
+                text=t_user(user, "group.offer_expired"),
             )
         return
 

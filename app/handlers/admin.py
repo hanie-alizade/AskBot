@@ -19,6 +19,7 @@ from ..config import config
 from services.subscription_service import SubscriptionService
 from services.subscription_readout import build_subscription_view, format_admin_subscription_status_message
 from services.entitlement_policy import EntitlementPolicy
+from services.i18n import t_user
 from services.payments.factory import build_payment_gateway
 from services.payments.webhook_service import WebhookService
 from services.vip_invite import notify_vip_invite_if_eligible
@@ -237,28 +238,25 @@ async def handle_reject_command(message: Message) -> None:
 
 
 async def send_rejection_notification(user_id: int, reason: str) -> None:
-    """Send rejection notification to user."""
+    """Send rejection notification to user — translated into the user's language."""
     try:
         if not _bot_instance:
             logger.error("Bot instance not available for sending rejection notification")
             return
-        
-        rejection_message = (
-            f"❌ **Access Request Rejected**\n\n"
-            f"Your request for VIP group access has been denied.\n\n"
-            f"**Reason:** {reason}\n\n"
-            f"If you believe this is an error, please contact an administrator.\n\n"
-            f"You may submit a new request after addressing the issue."
-        )
-        
-        await _bot_instance.send_message(
-            chat_id=user_id,
-            text=rejection_message,
-            parse_mode="Markdown"
-        )
-        
+
+        db = SessionLocal()
+        try:
+            target_user = get_user(db, user_id)
+        finally:
+            db.close()
+
+        rejection_message = t_user(target_user, "admin.user_rejected", reason=reason)
+
+        # No parse_mode: messages contain user-provided `reason` text we don't want to interpret.
+        await _bot_instance.send_message(chat_id=user_id, text=rejection_message)
+
         logger.info(f"Sent rejection notification to user {user_id}")
-        
+
     except Exception as e:
         logger.error(f"Error sending rejection notification to user {user_id}: {e}")
 
@@ -269,15 +267,14 @@ async def send_approval_notice(user_id: int) -> None:
         logger.warning("Bot instance not available for approval notice user_id=%s", user_id)
         return
     try:
+        db = SessionLocal()
+        try:
+            target_user = get_user(db, user_id)
+        finally:
+            db.close()
         await _bot_instance.send_message(
             chat_id=user_id,
-            text=(
-                "🎉 Your access request was approved.\n\n"
-                "Use /subscription to see your billing status, and /subscribe or /renew "
-                "to activate a plan when available.\n\n"
-                "You will receive a separate private message with the VIP group invite link "
-                "once your subscription is active (including a valid grace period)."
-            ),
+            text=t_user(target_user, "admin.user_approved"),
         )
         logger.info("Approval notice sent user_id=%s", user_id)
     except Exception as e:

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile services/i18n/__init__.py services/i18n/translator.py services/i18n/locales/__init__.py services/i18n/locales/en.py services/i18n/locales/es.py services/i18n/locales/ar.py services/i18n/locales/zh.py services/subscription_readout.py app/handlers/language.py app/handlers/verify.py app/handlers/access.py app/handlers/questions.py app/handlers/subscription_cmd.py app/bot.py database/models.py database/migration_runner.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python -c ' *)"
+    ]
+  }
+}
