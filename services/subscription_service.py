@@ -14,6 +14,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _vip_hook_after_subscription_change(db: Session, user_id: int) -> None:
+    from services.vip_membership import after_subscription_mutation
+
+    after_subscription_mutation(db, user_id)
+
+
 class SubscriptionService:
     """Service for managing subscriptions and payments."""
     
@@ -49,7 +55,8 @@ class SubscriptionService:
             if existing and existing.status == SubscriptionStatus.ACTIVE:
                 existing.status = SubscriptionStatus.CANCELLED
                 self.db.commit()
-            
+                _vip_hook_after_subscription_change(self.db, user_id)
+
             # Create new subscription
             subscription = Subscription(
                 user_id=user_id,
@@ -69,8 +76,9 @@ class SubscriptionService:
             self.db.refresh(subscription)
             
             logger.info(f"Activated {plan_name} subscription for user {user_id}")
+            _vip_hook_after_subscription_change(self.db, user_id)
             return subscription
-            
+
         except Exception as e:
             logger.error(f"Failed to activate subscription for user {user_id}: {e}")
             self.db.rollback()
@@ -84,6 +92,7 @@ class SubscriptionService:
         subscription.status = SubscriptionStatus.INACTIVE
         subscription.updated_at = datetime.utcnow()
         self.db.commit()
+        _vip_hook_after_subscription_change(self.db, user_id)
         return True
 
     def move_to_grace(self, user_id: int, grace_days: int = 3) -> bool:
@@ -96,8 +105,9 @@ class SubscriptionService:
         subscription.grace_until = now + timedelta(days=grace_days)
         subscription.updated_at = now
         self.db.commit()
+        _vip_hook_after_subscription_change(self.db, user_id)
         return True
-    
+
     def expire_subscription(self, user_id: int) -> bool:
         """Mark user's subscription as expired."""
         try:
@@ -111,8 +121,9 @@ class SubscriptionService:
             
             self.db.commit()
             logger.info(f"Expired subscription for user {user_id}")
+            _vip_hook_after_subscription_change(self.db, user_id)
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to expire subscription for user {user_id}: {e}")
             self.db.rollback()
@@ -133,8 +144,9 @@ class SubscriptionService:
             
             self.db.commit()
             logger.info(f"Cancelled subscription for user {user_id}")
+            _vip_hook_after_subscription_change(self.db, user_id)
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to cancel subscription for user {user_id}: {e}")
             self.db.rollback()
@@ -247,6 +259,7 @@ class SubscriptionService:
 
             self.db.commit()
             logger.info("Processed payment event %s for user %s", event.event_id, event.user_id)
+            _vip_hook_after_subscription_change(self.db, event.user_id)
             return True
         except Exception as e:
             logger.error(f"Failed to process payment event {event.event_id}: {e}")
@@ -377,6 +390,7 @@ class SubscriptionService:
             sub.status = SubscriptionStatus.EXPIRED
             sub.updated_at = datetime.utcnow()
             self.db.commit()
+            _vip_hook_after_subscription_change(self.db, user_id)
             self.admin_log_subscription_op(
                 "force_expire",
                 target_user_id=user_id,

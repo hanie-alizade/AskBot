@@ -23,7 +23,15 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     approved_at = Column(DateTime(timezone=True), nullable=True)
-    
+
+    # VIP group: subscription-linked membership (see services/vip_membership.py)
+    vip_invite_sent_at = Column(DateTime, nullable=True)
+    vip_sub_invalid_since = Column(DateTime, nullable=True)
+    vip_billing_removal_at = Column(DateTime, nullable=True)
+
+    # Preferred UI language. NULL = user has not picked yet (first-time picker shown).
+    language = Column(String(8), nullable=True)
+
     # Additional fields for future features
     question_limit = Column(Integer, default=5)  # Daily question limit
     questions_used = Column(Integer, default=0)     # Questions used today

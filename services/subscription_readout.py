@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 from app.config import config
 from services.entitlement_policy import EntitlementExplanation
+from services.i18n import t
 
 
 def payment_mode_label() -> str:
@@ -19,9 +20,9 @@ def payment_mode_label() -> str:
     return "REAL_NOT_CONFIGURED"
 
 
-def _fmt_dt(value: Optional[datetime]) -> str:
+def _fmt_dt(value: Optional[datetime], dash: str) -> str:
     if value is None:
-        return "—"
+        return dash
     return value.strftime("%Y-%m-%d %H:%M UTC")
 
 
@@ -40,48 +41,57 @@ def build_subscription_view(snapshot: Dict[str, Any], explanation: EntitlementEx
     )
 
 
-def format_user_subscription_message(vm: SubscriptionViewModel) -> str:
+def format_user_subscription_message(
+    vm: SubscriptionViewModel,
+    *,
+    include_next_action: bool = True,
+    lang: Optional[str] = None,
+) -> str:
+    """Format the subscription readout for a user. `lang=None` uses English (admin path)."""
     sub_status = vm.snapshot.get("subscription_status") or "NONE"
     user_st = vm.snapshot.get("user_status") or "UNKNOWN"
+    dash = t(lang, "sub.readout_dash")
+    plan = vm.snapshot.get("plan_name") or dash
+
     lines = [
-        "📋 Subscription",
+        t(lang, "sub.readout_title"),
         "",
-        f"• Account status: {user_st}",
-        f"• Subscription state: {sub_status}",
-        f"• Billing mode: {vm.mode_label}",
-        f"• Plan: {vm.snapshot.get('plan_name') or '—'}",
-        f"• Period end: {_fmt_dt(vm.snapshot.get('end_date'))}",
-        f"• Grace until: {_fmt_dt(vm.snapshot.get('grace_until'))}",
+        t(lang, "sub.readout_account_status", status=user_st),
+        t(lang, "sub.readout_sub_state", state=sub_status),
+        t(lang, "sub.readout_billing_mode", mode=vm.mode_label),
+        t(lang, "sub.readout_plan", plan=plan),
+        t(lang, "sub.readout_period_end", date=_fmt_dt(vm.snapshot.get("end_date"), dash)),
+        t(lang, "sub.readout_grace_until", date=_fmt_dt(vm.snapshot.get("grace_until"), dash)),
         "",
-        f"• Can ask questions: {'Yes' if vm.explanation.allows_questions else 'No'}",
-        f"• Access detail: {vm.explanation.reason}",
-        "",
-        _next_action_suggestion(vm),
+        t(
+            lang,
+            "sub.readout_can_ask",
+            yes_no=t(lang, "sub.readout_yes" if vm.explanation.allows_questions else "sub.readout_no"),
+        ),
+        t(lang, "sub.readout_access_detail", reason=vm.explanation.reason),
     ]
+    if include_next_action:
+        lines.extend(["", _next_action_suggestion(vm, lang)])
     return "\n".join(lines)
 
 
-def _next_action_suggestion(vm: SubscriptionViewModel) -> str:
+def _next_action_suggestion(vm: SubscriptionViewModel, lang: Optional[str]) -> str:
     if vm.explanation.allows_questions:
-        return "✅ You are good to go. Use /status anytime."
+        return t(lang, "sub.next_good_to_go")
     if vm.snapshot.get("user_status") != "APPROVED":
-        return "➡️ Complete onboarding: /start"
+        return t(lang, "sub.next_complete_onboarding")
     if vm.mode_label == "MOCK":
-        return "➡️ Try /subscribe to activate (mock), or ask an admin if you need help."
+        return t(lang, "sub.next_mock_subscribe")
     if vm.mode_label == "REAL_NOT_CONFIGURED":
-        return "➡️ Billing is not live yet. Watch for updates from admins."
-    return "➡️ Use /renew when checkout is available, or contact support."
+        return t(lang, "sub.next_not_configured")
+    return t(lang, "sub.next_use_renew")
 
 
 def format_admin_subscription_status_message(user_id: int, vm: SubscriptionViewModel) -> str:
-    base = format_user_subscription_message(vm)
+    """Admin view: stays in English by design."""
+    base = format_user_subscription_message(vm, include_next_action=False, lang=None)
     return f"🛠 Admin sub view — user {user_id}\n\n{base}"
 
 
-def subscribe_placeholder_message() -> str:
-    return (
-        "💳 Subscribe\n\n"
-        "Online checkout is not enabled yet. "
-        "You will be able to renew here once billing goes live.\n\n"
-        "If you need access urgently, contact an admin."
-    )
+def subscribe_placeholder_message(lang: Optional[str] = None) -> str:
+    return t(lang, "sub.placeholder_msg")

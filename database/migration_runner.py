@@ -30,6 +30,30 @@ def _ensure_sqlite_column(engine: Engine, table_name: str, column_name: str, ddl
     logger.info("Added missing column %s.%s", table_name, column_name)
 
 
+def _ensure_sqlite_column_with_backfill(
+    engine: Engine,
+    table_name: str,
+    column_name: str,
+    ddl_fragment: str,
+    backfill_sql: str,
+) -> None:
+    """
+    Add a column and run a one-time backfill in the same transaction.
+
+    The outer column-existence check guarantees the backfill runs exactly once,
+    so brand-new rows created later are not retroactively modified.
+    """
+    columns = _sqlite_table_columns(engine, table_name)
+    if column_name in columns:
+        return
+
+    add_stmt = f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl_fragment}"
+    with engine.begin() as conn:
+        conn.execute(text(add_stmt))
+        conn.execute(text(backfill_sql))
+    logger.info("Added column %s.%s and applied one-time backfill", table_name, column_name)
+
+
 def _ensure_index(engine: Engine, index_name: str, table_name: str, columns: str, unique: bool = False) -> None:
     prefix = "UNIQUE " if unique else ""
     statement = f"CREATE {prefix}INDEX IF NOT EXISTS {index_name} ON {table_name} ({columns})"
@@ -46,6 +70,18 @@ def run_baseline_migrations(engine: Engine) -> None:
     """
     dialect = engine.dialect.name
     if dialect == "sqlite":
+        _ensure_sqlite_column(engine, "users", "vip_invite_sent_at", "DATETIME")
+        _ensure_sqlite_column(engine, "users", "vip_sub_invalid_since", "DATETIME")
+        _ensure_sqlite_column(engine, "users", "vip_billing_removal_at", "DATETIME")
+        # Existing users keep working in English by default; new rows stay NULL
+        # so the first-time language picker is shown on next /start.
+        _ensure_sqlite_column_with_backfill(
+            engine,
+            "users",
+            "language",
+            "VARCHAR(8)",
+            "UPDATE users SET language = 'en' WHERE language IS NULL",
+        )
         _ensure_sqlite_column(engine, "subscriptions", "provider_customer_id", "VARCHAR(255)")
         _ensure_sqlite_column(engine, "subscriptions", "plan_code", "VARCHAR(50)")
         _ensure_sqlite_column(engine, "subscriptions", "billing_cycle", "VARCHAR(20) DEFAULT 'MONTHLY'")
