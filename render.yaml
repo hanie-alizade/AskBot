@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: askbot
+    runtime: python
+    plan: free
+    pythonVersion: 3.11
