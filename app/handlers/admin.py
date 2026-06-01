@@ -11,11 +11,18 @@ from aiogram.exceptions import TelegramBadRequest
 
 from database.crud import (
     get_user, update_user_status, get_all_users, get_pending_users, get_user_count_by_status,
-    retry_failed_delivery, update_question_status, reset_user_completely, reject_user
+    retry_failed_delivery, update_question_status, reset_user_completely, reject_user, create_user,
 )
 from database.db import SessionLocal
 from database.models import User
 from ..config import config
+from services.subscription_service import SubscriptionService
+from services.subscription_readout import build_subscription_view, format_admin_subscription_status_message
+from services.entitlement_policy import EntitlementPolicy
+from services.i18n import t_user
+from services.payments.factory import build_payment_gateway
+from services.payments.webhook_service import WebhookService
+from services.vip_invite import notify_vip_invite_if_eligible
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +56,7 @@ async def handle_approve_command(message: Message) -> None:
         parts = message.text.split()
         if len(parts) != 2:
             await message.answer(
-                "❌ Invalid format. Use: /approve <user_id>\n\n"
+                "❌ Invalid format. Use: /approve [user_id]\n\n"
                 "Example: /approve 123456789"
             )
             return
@@ -94,13 +101,12 @@ async def handle_approve_command(message: Message) -> None:
                 await message.answer("❌ Failed to approve user. Please try again.")
                 return
             
-            # Send invite link to user
-            await send_invite_to_user(user_id)
-            
-            # Confirm approval to admin
+            await send_approval_notice(user_id)
+
             await message.answer(
-                f"✅ User {user_id} has been approved!\n\n"
-                f"An invite link has been sent to the user."
+                f"✅ User {user_id} has been approved.\n\n"
+                f"They were notified in private chat. The VIP invite is sent only after "
+                f"they have an active subscription (or valid grace)."
             )
             
             logger.info(f"Admin {message.from_user.id} approved user {user_id}")
@@ -123,7 +129,7 @@ async def handle_reject_command(message: Message) -> None:
         if len(parts) < 2:
             await message.answer(
                 "❌ **Invalid Format**\n\n"
-                "Usage: `/reject <user_id> [reason]`\n\n"
+                "Usage: `/reject [user_id] [reason]`\n\n"
                 "Example: `/reject 123456789 Inappropriate content`\n\n"
                 "Reason is optional"
             )
@@ -232,55 +238,47 @@ async def handle_reject_command(message: Message) -> None:
 
 
 async def send_rejection_notification(user_id: int, reason: str) -> None:
-    """Send rejection notification to user."""
+    """Send rejection notification to user — translated into the user's language."""
     try:
         if not _bot_instance:
             logger.error("Bot instance not available for sending rejection notification")
             return
-        
-        rejection_message = (
-            f"❌ **Access Request Rejected**\n\n"
-            f"Your request for VIP group access has been denied.\n\n"
-            f"**Reason:** {reason}\n\n"
-            f"If you believe this is an error, please contact an administrator.\n\n"
-            f"You may submit a new request after addressing the issue."
-        )
-        
-        await _bot_instance.send_message(
-            chat_id=user_id,
-            text=rejection_message,
-            parse_mode="Markdown"
-        )
-        
+
+        db = SessionLocal()
+        try:
+            target_user = get_user(db, user_id)
+        finally:
+            db.close()
+
+        rejection_message = t_user(target_user, "admin.user_rejected", reason=reason)
+
+        # No parse_mode: messages contain user-provided `reason` text we don't want to interpret.
+        await _bot_instance.send_message(chat_id=user_id, text=rejection_message)
+
         logger.info(f"Sent rejection notification to user {user_id}")
-        
+
     except Exception as e:
         logger.error(f"Error sending rejection notification to user {user_id}: {e}")
-        
-    except Exception as e:
-        logger.error(f"Error in approve command: {e}")
-        await message.answer("❌ An error occurred while processing the approval.")
 
 
-async def send_invite_to_user(user_id: int) -> None:
-    """Send group invite link to approved user."""
+async def send_approval_notice(user_id: int) -> None:
+    """Tell user they are approved; VIP link is sent later when subscription is valid."""
+    if not _bot_instance:
+        logger.warning("Bot instance not available for approval notice user_id=%s", user_id)
+        return
     try:
-        invite_message = (
-            f"🎉 Congratulations! Your access request has been approved!\n\n"
-            f"You've been granted access to the VIP group. "
-            f"Click the link below to join:\n\n"
-            f"{config.group_invite_link}\n\n"
-            f"Welcome to the community! 🎊"
+        db = SessionLocal()
+        try:
+            target_user = get_user(db, user_id)
+        finally:
+            db.close()
+        await _bot_instance.send_message(
+            chat_id=user_id,
+            text=t_user(target_user, "admin.user_approved"),
         )
-        
-        if _bot_instance:
-            await _bot_instance.send_message(user_id, invite_message)
-            logger.info(f"Invite sent to user {user_id}")
-        else:
-            logger.warning(f"Bot instance not available. Invite message for user {user_id}: {invite_message}")
-        
+        logger.info("Approval notice sent user_id=%s", user_id)
     except Exception as e:
-        logger.error(f"Failed to send invite to user {user_id}: {e}")
+        logger.error("Failed to send approval notice to user %s: %s", user_id, e)
 
 
 @router.message(Command("pending"), AdminFilter(config.admin_id))
@@ -388,6 +386,117 @@ async def handle_stats_command(message: Message) -> None:
         db.close()
 
 
+@router.message(Command("sub_status"), AdminFilter(config.admin_id))
+async def handle_sub_status_command(message: Message) -> None:
+    """Admin: read-only subscription + entitlement snapshot."""
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Usage: /sub_status [user_id]")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user_id (must be numeric).")
+        return
+
+    db = SessionLocal()
+    try:
+        svc = SubscriptionService(db)
+        user = get_user(db, target_id)
+        snap = svc.get_subscription_snapshot(target_id, user=user)
+        expl = EntitlementPolicy().explain_question_entitlement(user)
+        vm = build_subscription_view(snap, expl)
+        await message.answer(format_admin_subscription_status_message(target_id, vm))
+        logger.info("admin sub_status target=%s by=%s", target_id, message.from_user.id)
+    finally:
+        db.close()
+
+
+@router.message(Command("sub_activate"), AdminFilter(config.admin_id))
+async def handle_sub_activate_command(message: Message) -> None:
+    """Admin: activate subscription via SubscriptionService."""
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Usage: /sub_activate [user_id]")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user_id (must be numeric).")
+        return
+
+    db = SessionLocal()
+    try:
+        svc = SubscriptionService(db)
+        ok = svc.admin_activate_subscription(
+            target_id,
+            admin_user_id=message.from_user.id,
+        )
+        if ok and _bot_instance:
+            await notify_vip_invite_if_eligible(_bot_instance, target_id)
+        await message.answer("✅ Activated." if ok else "❌ Activation failed (see logs).")
+    finally:
+        db.close()
+
+
+@router.message(Command("sub_expire"), AdminFilter(config.admin_id))
+async def handle_sub_expire_command(message: Message) -> None:
+    """Admin: force-expire latest subscription row."""
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Usage: /sub_expire [user_id]")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user_id (must be numeric).")
+        return
+
+    db = SessionLocal()
+    try:
+        svc = SubscriptionService(db)
+        ok = svc.force_expire_subscription(target_id, admin_user_id=message.from_user.id)
+        await message.answer("✅ Marked EXPIRED." if ok else "❌ No subscription row to expire.")
+    finally:
+        db.close()
+
+
+@router.message(Command("sub_grace"), AdminFilter(config.admin_id))
+async def handle_sub_grace_command(message: Message) -> None:
+    """Admin: move subscription to grace."""
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Usage: /sub_grace [user_id] [grace_days]")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user_id (must be numeric).")
+        return
+
+    grace_days = 3
+    if len(parts) >= 3:
+        try:
+            grace_days = int(parts[2])
+        except ValueError:
+            await message.answer("grace_days must be numeric.")
+            return
+
+    db = SessionLocal()
+    try:
+        svc = SubscriptionService(db)
+        ok = svc.admin_move_to_grace(
+            target_id,
+            admin_user_id=message.from_user.id,
+            grace_days=grace_days,
+        )
+        if ok and _bot_instance:
+            await notify_vip_invite_if_eligible(_bot_instance, target_id)
+        await message.answer("✅ Moved to GRACE." if ok else "❌ Grace transition failed (see logs).")
+    finally:
+        db.close()
+
+
 @router.message(Command("admin_help"), AdminFilter(config.admin_id))
 async def handle_admin_help_command(message: Message) -> None:
     """Handle /admin_help command to show admin commands."""
@@ -407,11 +516,17 @@ async def show_admin_menu(message: Message) -> None:
     help_text = (
         "🔧 Admin Menu\n\n"
         "Available commands:\n"
-        "/approve <user_id> - Approve pending users\n"
-        "/reject <user_id> [reason] - Reject pending users\n"
+        "/approve [user_id] - Approve pending users\n"
+        "/reject [user_id] [reason] - Reject pending users\n"
         "/users - Show all users with details\n"
         "/pending - Show all users pending approval\n"
         "/stats - View user statistics\n"
+        "/simulate_payment [user_id] [success|failed|renew|cancel] - Simulate payment event\n"
+        "/simulate_subscription_expiry [user_id] - Simulate subscription expiry\n"
+        "/sub_status [user_id] - Subscription + entitlement snapshot\n"
+        "/sub_activate [user_id] - Activate subscription (service layer)\n"
+        "/sub_expire [user_id] - Force-expire latest subscription\n"
+        "/sub_grace [user_id] [days] - Move subscription to grace\n"
         "/admin_help - Show this menu\n\n"
         "Or use the buttons below for quick actions:"
     )
@@ -487,7 +602,7 @@ async def handle_admin_start(message: Message) -> None:
             "👑 **Admin Welcome**\n\n"
             "You are automatically approved as an administrator.\n\n"
             "🔧 **Admin Features Available:**\n"
-            "• `/approve <user_id>` - Approve pending users\n"
+            "• `/approve [user_id]` - Approve pending users\n"
             "• `/pending` - View pending users\n"
             "• `/users` - View all users\n"
             "• `/stats` - View user statistics\n"
@@ -542,6 +657,38 @@ async def handle_unauthorized_admin_help(message: Message) -> None:
     await message.answer("❌ You are not authorized to use this command.")
 
 
+@router.message(Command("simulate_payment"))
+async def handle_unauthorized_simulate_payment(message: Message) -> None:
+    """Handle unauthorized /simulate_payment attempts."""
+    await message.answer("❌ You are not authorized to use this command.")
+
+
+@router.message(Command("simulate_subscription_expiry"))
+async def handle_unauthorized_simulate_subscription_expiry(message: Message) -> None:
+    """Handle unauthorized /simulate_subscription_expiry attempts."""
+    await message.answer("❌ You are not authorized to use this command.")
+
+
+@router.message(Command("sub_status"))
+async def handle_unauthorized_sub_status(message: Message) -> None:
+    await message.answer("❌ You are not authorized to use this command.")
+
+
+@router.message(Command("sub_activate"))
+async def handle_unauthorized_sub_activate(message: Message) -> None:
+    await message.answer("❌ You are not authorized to use this command.")
+
+
+@router.message(Command("sub_expire"))
+async def handle_unauthorized_sub_expire(message: Message) -> None:
+    await message.answer("❌ You are not authorized to use this command.")
+
+
+@router.message(Command("sub_grace"))
+async def handle_unauthorized_sub_grace(message: Message) -> None:
+    await message.answer("❌ You are not authorized to use this command.")
+
+
 @router.callback_query(F.data.startswith("approve:"), AdminFilter(config.admin_id))
 async def handle_approve_callback(callback: CallbackQuery) -> None:
     """Handle approve button click from inline keyboard."""
@@ -568,13 +715,12 @@ async def handle_approve_callback(callback: CallbackQuery) -> None:
             
             # Approve user
             if update_user_status(db, user_id, "APPROVED"):
-                # Send invite link to user
-                await send_invite_to_user(user_id)
-                
-                # Update admin message
+                await send_approval_notice(user_id)
+
                 await callback.message.edit_text(
-                    f"✅ User {user_id} has been approved!\n\n"
-                    f"An invite link has been sent to the user."
+                    f"✅ User {user_id} has been approved.\n\n"
+                    f"They were notified in private chat. The VIP invite is sent only after "
+                    f"they have an active subscription (or valid grace)."
                 )
                 
                 logger.info(f"Admin approved user {user_id} via button")
@@ -700,7 +846,7 @@ async def retry_failed_question_command(message: Message) -> None:
         if len(command_parts) != 2:
             await message.answer(
                 "❌ **Invalid Command**\n\n"
-                "Usage: `/retry <question_id>`\n\n"
+                "Usage: `/retry [question_id]`\n\n"
                 "Example: `/retry 123`"
             )
             return
@@ -773,10 +919,94 @@ async def retry_failed_question_command(message: Message) -> None:
         await message.answer("❌ An error occurred while processing the retry command.")
 
 
+@router.message(Command("simulate_payment"))
+async def simulate_payment_command(message: Message) -> None:
+    """
+    Simulate payment events locally.
+    Usage: /simulate_payment [user_id] [success|failed|renew|cancel]
+    """
+    if not message.from_user or message.from_user.id != config.admin_id:
+        return
+
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer(
+            "❌ **Invalid Command**\n\n"
+            "Usage: `/simulate_payment [user_id] [success|failed|renew|cancel]`"
+        )
+        return
+
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ User ID must be numeric.")
+        return
+
+    action = parts[2].lower()
+    event_map = {
+        "success": "payment.succeeded",
+        "failed": "payment.failed",
+        "renew": "subscription.renewed",
+        "cancel": "subscription.cancelled",
+    }
+    event_type = event_map.get(action)
+    if not event_type:
+        await message.answer("❌ Action must be one of: success, failed, renew, cancel")
+        return
+
+    db = SessionLocal()
+    try:
+        gateway = build_payment_gateway()
+        webhook = WebhookService(db, gateway)
+        ok = webhook.process_mock_event(event_type=event_type, user_id=user_id)
+        if ok and _bot_instance and event_type in ("payment.succeeded", "subscription.renewed"):
+            await notify_vip_invite_if_eligible(_bot_instance, user_id)
+        if ok:
+            await message.answer(f"✅ Simulated `{event_type}` for user `{user_id}`", parse_mode="Markdown")
+        else:
+            await message.answer(f"❌ Failed to simulate `{event_type}` for user `{user_id}`", parse_mode="Markdown")
+    finally:
+        db.close()
+
+
+@router.message(Command("simulate_subscription_expiry"))
+async def simulate_subscription_expiry_command(message: Message) -> None:
+    """
+    Simulate subscription expiry transition for local testing.
+    Usage: /simulate_subscription_expiry [user_id]
+    """
+    if not message.from_user or message.from_user.id != config.admin_id:
+        return
+
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer(
+            "❌ **Invalid Command**\n\n"
+            "Usage: `/simulate_subscription_expiry [user_id]`"
+        )
+        return
+
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ User ID must be numeric.")
+        return
+
+    db = SessionLocal()
+    try:
+        service = SubscriptionService(db)
+        if service.expire_subscription(user_id):
+            await message.answer(f"✅ Simulated subscription expiry for user `{user_id}`", parse_mode="Markdown")
+        else:
+            await message.answer(f"❌ No active subscription found for user `{user_id}`", parse_mode="Markdown")
+    finally:
+        db.close()
+
+
 # TODO: remove in production if not needed
 @router.message(Command("reset_user"))
 async def reset_user_command(message: Message) -> None:
-    """Reset user completely for testing purposes."""
+    """Admin: permanently delete a user and all related data (full GDPR-style wipe for this bot)."""
     if not message.from_user or message.from_user.id != config.admin_id:
         return
     
@@ -786,7 +1016,7 @@ async def reset_user_command(message: Message) -> None:
         if len(command_parts) != 2:
             await message.answer(
                 "❌ **Invalid Command**\n\n"
-                "Usage: `/reset_user <telegram_user_id>`\n\n"
+                "Usage: `/reset_user [telegram_user_id]`\n\n"
                 "Example: `/reset_user 7285268952`"
             )
             return
@@ -823,8 +1053,9 @@ async def reset_user_command(message: Message) -> None:
             # Reset user completely
             if reset_user_completely(db, target_user_id):
                 await message.answer(
-                    f"✅ **User Reset Successfully**\n\n"
-                    f"User {target_user_id} has been reset successfully."
+                    f"✅ User {target_user_id} was fully removed from the database.\n\n"
+                    f"All questions, subscription, and payment rows for this ID are deleted.\n"
+                    f"They will be treated as a brand-new user the next time they send /start."
                 )
                 logger.info(f"Admin reset user {target_user_id}")
             else:

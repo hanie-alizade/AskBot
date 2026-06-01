@@ -33,10 +33,14 @@ Base = declarative_base()
 def init_db() -> None:
     """Initialize database tables."""
     from .models import User
+    from .models_subscription import Subscription, Payment
+    from .models_webhook import WebhookProcessingLog  # noqa: F401
+    from .migration_runner import run_baseline_migrations
     
     try:
         # Create all tables
         Base.metadata.create_all(bind=engine)
+        run_baseline_migrations(engine)
         logger = logging.getLogger(__name__)
         logger.info("Database tables created successfully")
     except Exception as e:
