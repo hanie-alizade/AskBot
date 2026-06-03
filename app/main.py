@@ -46,8 +46,8 @@ def validate_startup_config() -> bool:
     
     logger.info("✅ Startup configuration validation passed")
     logger.info(f"MOCK_PAYMENT_ENABLED={config.mock_payment_enabled}")
-    logger.info(f"STRIPE_SECRET_KEY present = {bool(config.stripe_api_key)}")
-    logger.info(f"STRIPE_PRICE_ID present = {bool(config.stripe_price_id)}")
+    logger.info(f"STRIPE_SECRET_KEY loaded = {bool(config.stripe_secret_key)}")
+    logger.info(f"STRIPE_PRICE_ID loaded = {bool(config.stripe_price_id)}")
     return True
 
 

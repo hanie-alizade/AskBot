@@ -33,17 +33,20 @@ def create_checkout_session(telegram_id: int) -> str:
     Raises StripeCheckoutConfigError if STRIPE_SECRET_KEY or STRIPE_PRICE_ID are
     not set. Stripe SDK errors propagate as stripe.error.StripeError.
     """
-    secret_key = config.stripe_api_key  # env: STRIPE_SECRET_KEY
-    price_id = config.stripe_price_id   # env: STRIPE_PRICE_ID
+    logger.warning("stripe checkout called telegram_id=%s", telegram_id)
 
-    logger.info("STRIPE_SECRET_KEY present = %s", bool(secret_key))
-    logger.info("STRIPE_PRICE_ID present = %s", bool(price_id))
+    secret_key = config.stripe_secret_key  # env: STRIPE_SECRET_KEY
+    price_id = config.stripe_price_id      # env: STRIPE_PRICE_ID
+
+    # Diagnostics BEFORE any validation, so the log always shows actual state.
+    logger.info("STRIPE_SECRET_KEY exists = %s", bool(secret_key))
+    logger.info("STRIPE_PRICE_ID exists = %s", bool(price_id))
 
     if not secret_key:
-        logger.error("Stripe config error: STRIPE_SECRET_KEY missing")
+        logger.error("STRIPE CONFIG ERROR: STRIPE_SECRET_KEY missing")
         raise StripeCheckoutConfigError("STRIPE_SECRET_KEY missing")
     if not price_id:
-        logger.error("Stripe config error: STRIPE_PRICE_ID missing")
+        logger.error("STRIPE CONFIG ERROR: STRIPE_PRICE_ID missing")
         raise StripeCheckoutConfigError("STRIPE_PRICE_ID missing")
 
     stripe.api_key = secret_key

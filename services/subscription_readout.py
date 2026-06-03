@@ -15,7 +15,7 @@ from services.i18n import t
 def payment_mode_label() -> str:
     if config.mock_payment_enabled:
         return "MOCK"
-    if config.stripe_api_key:
+    if config.stripe_secret_key:
         return "REAL_READY"
     return "REAL_NOT_CONFIGURED"
 

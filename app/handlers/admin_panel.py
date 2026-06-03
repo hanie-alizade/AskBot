@@ -176,7 +176,7 @@ def _system_settings_text() -> str:
             f"MOCK_SUBSCRIPTION_ACTIVE_BY_DEFAULT: <b>{config.mock_subscription_active_by_default}</b>",
             f"VIP lapse removal delay (s): <code>{config.vip_subscription_lapse_removal_delay_seconds}</code>",
             f"VIP sync interval (s): <code>{config.vip_membership_sync_interval_seconds}</code>",
-            f"Stripe key set: <b>{bool(config.stripe_api_key)}</b>",
+            f"Stripe key set: <b>{bool(config.stripe_secret_key)}</b>",
             f"Webhook secret set: <b>{bool(config.stripe_webhook_secret)}</b>",
         ]
     )
