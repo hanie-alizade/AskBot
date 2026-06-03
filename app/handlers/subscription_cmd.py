@@ -22,6 +22,7 @@ from services.subscription_readout import (
 )
 from services.payments.factory import build_payment_gateway
 from services.payments.webhook_service import WebhookService
+from services.stripe_checkout import StripeCheckoutConfigError, create_checkout_session
 from services.vip_invite import notify_vip_invite_if_eligible
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,27 @@ async def handle_subscribe_or_renew(message: Message) -> None:
             logger.info("subscribe_cmd mock user_id=%s ok=%s", user_id, ok)
             return
 
-        await message.answer(subscribe_placeholder_message(lang=getattr(user, "language", None)))
-        logger.info("subscribe_cmd placeholder user_id=%s", user_id)
+        # Real path: create a Stripe Checkout Session and send the URL to the user.
+        # Webhook handling / subscription activation are not implemented yet.
+        try:
+            checkout_url = create_checkout_session(telegram_id=user_id)
+        except StripeCheckoutConfigError as e:
+            logger.error("subscribe_cmd stripe_config_error user_id=%s err=%s", user_id, e)
+            await message.answer(
+                "⚠️ Subscription checkout is not configured yet. Please try again later."
+            )
+            return
+        except Exception as e:
+            logger.exception("subscribe_cmd stripe_error user_id=%s err=%s", user_id, e)
+            await message.answer(
+                "⚠️ We couldn't start the checkout right now. Please try again in a moment."
+            )
+            return
+
+        await message.answer(
+            "💳 Tap the link below to start your subscription:\n\n"
+            f"{checkout_url}"
+        )
+        logger.info("subscribe_cmd stripe user_id=%s", user_id)
     finally:
         db.close()
