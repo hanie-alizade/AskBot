@@ -9,6 +9,8 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import ErrorEvent
 from database.db import SessionLocal
 from .config import config
 
@@ -51,6 +53,23 @@ bot = Bot(
 
 # Create dispatcher instance
 dp = Dispatcher()
+
+
+@dp.error()
+async def _swallow_stale_callback_errors(event: ErrorEvent) -> bool:
+    """Silence "query is too old" callback answer errors.
+
+    Telegram drops callback_query IDs after ~15 minutes. When the bot is
+    restarted, polling replays any queued callback presses; by the time the
+    handler runs and calls `callback.answer()` the ID is no longer valid and
+    Telegram returns Bad Request. The handler itself already succeeded — only
+    the trailing answer fails — so it's safe to log-and-swallow.
+    """
+    exc = event.exception
+    if isinstance(exc, TelegramBadRequest) and "query is too old" in str(exc).lower():
+        logger.info("Ignored stale callback_query answer: %s", exc)
+        return True
+    return False
 
 
 async def setup_bot() -> None:
