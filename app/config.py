@@ -25,7 +25,10 @@ class BotConfig:
         self.subscription_grandfather_enabled: bool = self._get_optional_bool_env(
             "SUBSCRIPTION_GRANDFATHER_ENABLED", True
         )
-        self.mock_payment_enabled: bool = self._get_optional_bool_env("MOCK_PAYMENT_ENABLED", True)
+        # Default False so production deployments never silently fall back to
+        # mock payments when the env var is missing. Tests / local dev that
+        # want mock behavior must set MOCK_PAYMENT_ENABLED=true explicitly.
+        self.mock_payment_enabled: bool = self._get_optional_bool_env("MOCK_PAYMENT_ENABLED", False)
         # Legacy env: kept for .env compatibility. Does not affect entitlement;
         # mock mode only routes checkout/webhooks via the payment factory.
         self.mock_subscription_active_by_default: bool = self._get_optional_bool_env(

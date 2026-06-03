@@ -66,6 +66,8 @@ async def handle_subscribe_or_renew(message: Message) -> None:
         return
 
     user_id = message.from_user.id
+    logger.info("SUBSCRIBE COMMAND RECEIVED")
+    logger.info(f"MOCK_PAYMENT_ENABLED={config.mock_payment_enabled}")
     db = SessionLocal()
     try:
         user = get_user(db, user_id)
@@ -74,6 +76,7 @@ async def handle_subscribe_or_renew(message: Message) -> None:
             return
 
         if config.mock_payment_enabled:
+            logger.info("ENTERING MOCK PAYMENT FLOW")
             gateway = build_payment_gateway()
             webhook = WebhookService(db, gateway)
             ok = webhook.process_mock_event(event_type="payment.succeeded", user_id=user_id)
@@ -85,6 +88,7 @@ async def handle_subscribe_or_renew(message: Message) -> None:
             logger.info("subscribe_cmd mock user_id=%s ok=%s", user_id, ok)
             return
 
+        logger.info("ENTERING STRIPE CHECKOUT FLOW")
         # Real path: create a Stripe Checkout Session and send the URL to the user.
         # Webhook handling / subscription activation are not implemented yet.
         try:

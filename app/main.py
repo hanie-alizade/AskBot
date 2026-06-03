@@ -45,6 +45,7 @@ def validate_startup_config() -> bool:
         return False
     
     logger.info("✅ Startup configuration validation passed")
+    logger.info(f"MOCK_PAYMENT_ENABLED={config.mock_payment_enabled}")
     return True
 
 
