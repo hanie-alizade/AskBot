@@ -1,8 +1,8 @@
 """
 Stripe Checkout Session creation.
 
-Reads credentials from environment at call time so the module imports cleanly
-even when Stripe is not configured (e.g. mock-payment mode).
+Reads credentials from config (single source of truth) so the env-var names
+match what `app/config.py` reads and nothing is duplicated.
 
 Intentionally minimal: it returns the Checkout URL. Webhook handling and
 subscription activation live elsewhere (not implemented in this step).
@@ -11,10 +11,11 @@ subscription activation live elsewhere (not implemented in this step).
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional
 
 import stripe
+
+from app.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +33,18 @@ def create_checkout_session(telegram_id: int) -> str:
     Raises StripeCheckoutConfigError if STRIPE_SECRET_KEY or STRIPE_PRICE_ID are
     not set. Stripe SDK errors propagate as stripe.error.StripeError.
     """
-    secret_key = os.getenv("STRIPE_SECRET_KEY")
-    price_id = os.getenv("STRIPE_PRICE_ID")
+    secret_key = config.stripe_api_key  # env: STRIPE_SECRET_KEY
+    price_id = config.stripe_price_id   # env: STRIPE_PRICE_ID
 
-    missing = [
-        name
-        for name, value in (("STRIPE_SECRET_KEY", secret_key), ("STRIPE_PRICE_ID", price_id))
-        if not value
-    ]
-    if missing:
-        raise StripeCheckoutConfigError(
-            f"Missing required Stripe env vars: {', '.join(missing)}"
-        )
+    logger.info("STRIPE_SECRET_KEY present = %s", bool(secret_key))
+    logger.info("STRIPE_PRICE_ID present = %s", bool(price_id))
+
+    if not secret_key:
+        logger.error("Stripe config error: STRIPE_SECRET_KEY missing")
+        raise StripeCheckoutConfigError("STRIPE_SECRET_KEY missing")
+    if not price_id:
+        logger.error("Stripe config error: STRIPE_PRICE_ID missing")
+        raise StripeCheckoutConfigError("STRIPE_PRICE_ID missing")
 
     stripe.api_key = secret_key
 
