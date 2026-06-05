@@ -92,7 +92,7 @@ async def handle_subscribe_or_renew(message: Message) -> None:
         # Real path: create a Stripe Checkout Session and send the URL to the user.
         # Webhook handling / subscription activation are not implemented yet.
         try:
-            checkout_url = create_checkout_session(telegram_id=user_id)
+            checkout_url = create_checkout_session(telegram_id=user_id, db=db)
         except StripeCheckoutConfigError as e:
             logger.error("subscribe_cmd stripe_config_error user_id=%s err=%s", user_id, e)
             await message.answer(

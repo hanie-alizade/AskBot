@@ -599,3 +599,137 @@ def list_webhook_logs_paginated(
     total = int(base.count() or 0)
     rows = base.offset(offset).limit(limit).all()
     return rows, total
+
+
+# --- Checkout session persistence ---
+
+
+def create_checkout_session_record(
+    db: Session,
+    *,
+    telegram_id: int,
+    stripe_session_id: str,
+) -> "CheckoutSession":
+    """Insert a CheckoutSession row in CREATED state.
+
+    Uniqueness on stripe_session_id is enforced by a DB index; callers should
+    handle IntegrityError if Stripe ever returns a duplicate id (it shouldn't).
+    """
+    from database.models_checkout import CheckoutSession, CheckoutSessionStatus
+
+    row = CheckoutSession(
+        telegram_id=telegram_id,
+        stripe_session_id=stripe_session_id,
+        status=CheckoutSessionStatus.CREATED.value,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def get_checkout_by_stripe_session_id(
+    db: Session, stripe_session_id: str
+) -> Optional["CheckoutSession"]:
+    from database.models_checkout import CheckoutSession
+
+    return (
+        db.query(CheckoutSession)
+        .filter(CheckoutSession.stripe_session_id == stripe_session_id)
+        .first()
+    )
+
+
+def get_checkout_by_stripe_subscription_id(
+    db: Session, stripe_subscription_id: str
+) -> Optional["CheckoutSession"]:
+    """Look up the most recent checkout that was linked to this Stripe subscription."""
+    from database.models_checkout import CheckoutSession
+
+    return (
+        db.query(CheckoutSession)
+        .filter(CheckoutSession.stripe_subscription_id == stripe_subscription_id)
+        .order_by(CheckoutSession.id.desc())
+        .first()
+    )
+
+
+def mark_checkout_completed(
+    db: Session,
+    *,
+    stripe_session_id: str,
+    stripe_subscription_id: Optional[str],
+    stripe_customer_id: Optional[str],
+    amount_total_cents: Optional[int],
+    currency: Optional[str],
+) -> Optional["CheckoutSession"]:
+    """Move CheckoutSession to COMPLETED and capture downstream Stripe IDs.
+
+    Returns the updated row, or None if no matching row was found (recovery
+    scenario — webhook arrived for a session we never recorded).
+    """
+    from database.models_checkout import CheckoutSession, CheckoutSessionStatus
+
+    row = get_checkout_by_stripe_session_id(db, stripe_session_id)
+    if not row:
+        return None
+    # Idempotent: only advance state forward.
+    if row.status == CheckoutSessionStatus.CREATED.value:
+        row.status = CheckoutSessionStatus.COMPLETED.value
+        row.completed_at = datetime.utcnow()
+    row.stripe_subscription_id = stripe_subscription_id or row.stripe_subscription_id
+    row.stripe_customer_id = stripe_customer_id or row.stripe_customer_id
+    if amount_total_cents is not None:
+        row.amount_total_cents = amount_total_cents
+    if currency:
+        row.currency = currency.upper()
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def mark_checkout_activated(db: Session, *, stripe_session_id: str) -> bool:
+    """Move CheckoutSession to ACTIVATED. Idempotent."""
+    from database.models_checkout import CheckoutSession, CheckoutSessionStatus
+
+    row = get_checkout_by_stripe_session_id(db, stripe_session_id)
+    if not row:
+        return False
+    if row.status != CheckoutSessionStatus.ACTIVATED.value:
+        row.status = CheckoutSessionStatus.ACTIVATED.value
+        row.activated_at = datetime.utcnow()
+        db.commit()
+    return True
+
+
+def list_stale_unpaid_checkouts(
+    db: Session, *, older_than: datetime, limit: int = 100
+) -> List["CheckoutSession"]:
+    """Sessions still CREATED past the cutoff — abandoned by the user or lost upstream."""
+    from database.models_checkout import CheckoutSession, CheckoutSessionStatus
+
+    return (
+        db.query(CheckoutSession)
+        .filter(
+            CheckoutSession.status == CheckoutSessionStatus.CREATED.value,
+            CheckoutSession.created_at < older_than,
+        )
+        .order_by(CheckoutSession.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+
+def list_completed_not_activated_checkouts(
+    db: Session, *, limit: int = 100
+) -> List["CheckoutSession"]:
+    """Sessions Stripe says are paid but our subscription writer never closed."""
+    from database.models_checkout import CheckoutSession, CheckoutSessionStatus
+
+    return (
+        db.query(CheckoutSession)
+        .filter(CheckoutSession.status == CheckoutSessionStatus.COMPLETED.value)
+        .order_by(CheckoutSession.completed_at.asc())
+        .limit(limit)
+        .all()
+    )

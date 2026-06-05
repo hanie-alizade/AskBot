@@ -1,11 +1,11 @@
 """
 Stripe Checkout Session creation.
 
-Reads credentials from config (single source of truth) so the env-var names
-match what `app/config.py` reads and nothing is duplicated.
+Creates the Stripe-side session, persists a local CheckoutSession row in
+CREATED state, and returns the URL. The local row is the single source of
+truth for webhook idempotency and operator recovery queries.
 
-Intentionally minimal: it returns the Checkout URL. Webhook handling and
-subscription activation live elsewhere (not implemented in this step).
+Reads credentials from `app.config.config` (single source of truth).
 """
 
 from __future__ import annotations
@@ -14,8 +14,11 @@ import logging
 from typing import Optional
 
 import stripe
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app.config import config
+from database.crud import create_checkout_session_record
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +30,14 @@ class StripeCheckoutConfigError(RuntimeError):
     """Raised when Stripe env vars required to build a Checkout Session are missing."""
 
 
-def create_checkout_session(telegram_id: int) -> str:
-    """Create a Stripe Checkout Session for a Telegram user and return its URL.
+def create_checkout_session(telegram_id: int, db: Session) -> str:
+    """Create a Stripe Checkout Session, persist it locally, return the URL.
 
     Raises StripeCheckoutConfigError if STRIPE_SECRET_KEY or STRIPE_PRICE_ID are
     not set. Stripe SDK errors propagate as stripe.error.StripeError.
+
+    The caller supplies a DB session so the CheckoutSession row is written in
+    the same transactional context as the rest of the /subscribe handler.
     """
     logger.warning("stripe checkout called telegram_id=%s", telegram_id)
 
@@ -64,6 +70,38 @@ def create_checkout_session(telegram_id: int) -> str:
         telegram_id,
         session.id,
     )
+
+    # Persist BEFORE returning so a slow/lost DM doesn't cost us the linkage.
+    try:
+        create_checkout_session_record(
+            db,
+            telegram_id=telegram_id,
+            stripe_session_id=session.id,
+        )
+        logger.info(
+            "checkout_session_stored telegram_id=%s session_id=%s",
+            telegram_id,
+            session.id,
+        )
+    except IntegrityError:
+        # Shouldn't happen — Stripe Checkout Session IDs are globally unique.
+        # Log and continue; the row already exists, so recovery still works.
+        db.rollback()
+        logger.warning(
+            "checkout_session_store_duplicate telegram_id=%s session_id=%s",
+            telegram_id,
+            session.id,
+        )
+    except Exception as e:
+        # Persistence failure is non-fatal for the user — they can still pay.
+        # But operator visibility drops to zero for this session, so shout.
+        db.rollback()
+        logger.exception(
+            "checkout_session_store_failed telegram_id=%s session_id=%s err=%s",
+            telegram_id,
+            session.id,
+            e,
+        )
 
     url: Optional[str] = session.url
     if not url:
