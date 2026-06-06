@@ -99,7 +99,10 @@ async def ban_vip_group_for_billing(bot: Bot, telegram_id: int) -> bool:
         return False
     try:
         await bot.ban_chat_member(chat_id=config.vip_group_id, user_id=telegram_id)
-        logger.info("vip_membership ban subscription_lapsed telegram_id=%s", telegram_id)
+        logger.info(
+            "VIP ACCESS REMOVED telegram_id=%s reason=subscription_lapsed",
+            telegram_id,
+        )
         return True
     except TelegramBadRequest as e:
         logger.warning("vip_membership ban bad_request telegram_id=%s err=%s", telegram_id, e)
@@ -115,9 +118,21 @@ async def ban_vip_group_for_billing(bot: Bot, telegram_id: int) -> bool:
 async def reconcile_vip_group_membership(bot: Bot, db: Session) -> None:
     """
     Periodic job: start/continue lapse timers, remove from group after delay, unban on renewal.
+
+    Also runs the subscription lapse sweep so CANCELLED rows past end_date and
+    PAST_DUE rows past grace_until flip to EXPIRED before entitlement runs.
     """
     if not config.vip_group_id:
         return
+
+    # Flip stale CANCELLED / PAST_DUE rows to EXPIRED so entitlement denies
+    # cleanly and the VIP ban path engages on the next iteration.
+    try:
+        from services.subscription_service import SubscriptionService
+
+        SubscriptionService(db).sweep_lapsed_subscriptions()
+    except Exception as e:
+        logger.error("sweep_lapsed_subscriptions failed: %s", e, exc_info=True)
 
     now = datetime.utcnow()
     delay = timedelta(seconds=max(1, config.vip_subscription_lapse_removal_delay_seconds))

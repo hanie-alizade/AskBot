@@ -14,6 +14,13 @@ from database.crud import create_user, get_user, update_user_status
 from database.db import SessionLocal
 from services.entitlement_policy import EntitlementPolicy
 from services.i18n import t_user
+from services.legal_documents import (
+    REQUIRED_DOCUMENTS,
+    get_document,
+    has_accepted_all,
+    is_accepted,
+    mark_accepted,
+)
 
 from ..config import config
 
@@ -84,6 +91,16 @@ async def send_welcome_for_status(message: Message, user) -> None:
     the user's current language. Sent as a second message because a single
     Telegram message can carry only one reply_markup (inline OR reply keyboard).
     """
+    # Legal-acceptance redirect: any user (NEW or existing) with missing
+    # documents lands on the acceptance screen instead of their normal welcome.
+    # NEW users would land here anyway after tapping Verify; this branch makes
+    # sure existing approved users from before the legal flow existed have a
+    # path to complete acceptance.
+    if not has_accepted_all(user):
+        text, kb = _legal_screen(user)
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+        return
+
     status = user.status
     if status == "NEW":
         text, kb = _welcome_new(user)
@@ -165,9 +182,39 @@ async def handle_start(message: Message) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _legal_screen(user) -> Tuple[str, InlineKeyboardMarkup]:
+    """Render the legal-acceptance screen reflecting current acceptance state."""
+    rows = []
+    for doc in REQUIRED_DOCUMENTS:
+        accepted = is_accepted(user, doc)
+        if accepted:
+            rows.append(
+                [InlineKeyboardButton(text=f"✅ {doc.label}", callback_data=f"legal_view:{doc.key}")]
+            )
+        else:
+            rows.append(
+                [
+                    InlineKeyboardButton(text=f"📄 View {doc.label}", callback_data=f"legal_view:{doc.key}"),
+                    InlineKeyboardButton(text=f"✅ Accept", callback_data=f"legal_accept:{doc.key}"),
+                ]
+            )
+
+    if has_accepted_all(user):
+        rows.append(
+            [InlineKeyboardButton(text=t_user(user, "legal.finalize_btn"), callback_data="legal_finalize")]
+        )
+
+    text = t_user(user, "legal.intro")
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 @router.callback_query(F.data == "verify_user")
 async def handle_verify_callback(callback: CallbackQuery) -> None:
-    """Handle verification button click."""
+    """Launch the legal-acceptance flow.
+
+    Verification can only complete after every required document is accepted at
+    its current version. The flip to VERIFIED happens in handle_legal_finalize.
+    """
     user_id = callback.from_user.id
 
     db = SessionLocal()
@@ -180,21 +227,116 @@ async def handle_verify_callback(callback: CallbackQuery) -> None:
             )
             return
 
-        update_user_status(db, user_id, "VERIFIED")
-        # Refresh to read updated status with the same language.
+        text, kb = _legal_screen(user)
+        await callback.message.edit_text(text, reply_markup=kb)
+        await callback.answer()
+        logger.info("Legal acceptance flow started user_id=%s", user_id)
+    finally:
+        db.close()
+
+
+@router.callback_query(F.data.startswith("legal_view:"))
+async def handle_legal_view(callback: CallbackQuery) -> None:
+    """Show a single document's text with a Back button."""
+    user_id = callback.from_user.id
+    key = callback.data.split(":", 1)[1]
+    doc = get_document(key)
+    if doc is None:
+        await callback.answer()
+        return
+
+    db = SessionLocal()
+    try:
         user = get_user(db, user_id)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t_user(user, "legal.back_btn"), callback_data="legal_back")],
+        ])
+        await callback.message.edit_text(doc.text, reply_markup=kb, parse_mode="HTML")
+        await callback.answer()
+    finally:
+        db.close()
+
+
+@router.callback_query(F.data == "legal_back")
+async def handle_legal_back(callback: CallbackQuery) -> None:
+    """Return to the legal-acceptance overview from a single-document view."""
+    user_id = callback.from_user.id
+    db = SessionLocal()
+    try:
+        user = get_user(db, user_id)
+        if not user:
+            await callback.answer()
+            return
+        text, kb = _legal_screen(user)
+        await callback.message.edit_text(text, reply_markup=kb)
+        await callback.answer()
+    finally:
+        db.close()
+
+
+@router.callback_query(F.data.startswith("legal_accept:"))
+async def handle_legal_accept(callback: CallbackQuery) -> None:
+    """Record acceptance of a single document, then redraw the overview."""
+    user_id = callback.from_user.id
+    key = callback.data.split(":", 1)[1]
+    doc = get_document(key)
+    if doc is None:
+        await callback.answer()
+        return
+
+    db = SessionLocal()
+    try:
+        user = get_user(db, user_id)
+        if not user:
+            await callback.answer()
+            return
+        was_accepted = is_accepted(user, doc)
+        if not was_accepted:
+            mark_accepted(user, doc)
+            db.commit()
+            db.refresh(user)
+            logger.info(
+                "LEGAL ACCEPTED telegram_id=%s document=%s version=%s",
+                user_id, doc.key, doc.version,
+            )
+        text, kb = _legal_screen(user)
+        await callback.message.edit_text(text, reply_markup=kb)
+        await callback.answer(t_user(user, "legal.alert_accepted"))
+    finally:
+        db.close()
+
+
+@router.callback_query(F.data == "legal_finalize")
+async def handle_legal_finalize(callback: CallbackQuery) -> None:
+    """Flip NEW → VERIFIED once every required document is accepted."""
+    user_id = callback.from_user.id
+    db = SessionLocal()
+    try:
+        user = get_user(db, user_id)
+        if not user:
+            await callback.answer()
+            return
+
+        if not has_accepted_all(user):
+            await callback.answer(
+                t_user(user, "legal.alert_incomplete"),
+                show_alert=True,
+            )
+            return
+
+        if user.status == "NEW":
+            update_user_status(db, user_id, "VERIFIED")
+            user = get_user(db, user_id)
+            logger.info("User %s completed verification (post legal acceptance)", user_id)
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t_user(user, "btn.request_access"), callback_data="request_access")],
         ])
-
         await callback.message.edit_text(
             t_user(user, "verify.complete"),
             reply_markup=keyboard,
         )
-
         await callback.answer(t_user(user, "verify.alert_success"))
-        logger.info(f"User {user_id} completed verification")
     finally:
         db.close()
 

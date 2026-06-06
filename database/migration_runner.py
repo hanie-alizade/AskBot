@@ -73,6 +73,29 @@ def run_baseline_migrations(engine: Engine) -> None:
         _ensure_sqlite_column(engine, "users", "vip_invite_sent_at", "DATETIME")
         _ensure_sqlite_column(engine, "users", "vip_sub_invalid_since", "DATETIME")
         _ensure_sqlite_column(engine, "users", "vip_billing_removal_at", "DATETIME")
+        # Legal-acceptance gate columns (client document, June 2026).
+        _ensure_sqlite_column(engine, "users", "disclaimer_accepted_at", "DATETIME")
+        _ensure_sqlite_column(engine, "users", "disclaimer_version", "VARCHAR(32)")
+        _ensure_sqlite_column(engine, "users", "terms_accepted_at", "DATETIME")
+        _ensure_sqlite_column(engine, "users", "terms_version", "VARCHAR(32)")
+        _ensure_sqlite_column(engine, "users", "privacy_accepted_at", "DATETIME")
+        _ensure_sqlite_column(engine, "users", "privacy_version", "VARCHAR(32)")
+        _ensure_sqlite_column(engine, "users", "liability_accepted_at", "DATETIME")
+        _ensure_sqlite_column(engine, "users", "liability_version", "VARCHAR(32)")
+        # VIP Legal question quota: shift legacy default 5/day to new 2/month.
+        # Idempotent: only touches rows still at the previous default.
+        try:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    text("UPDATE users SET question_limit = 2 WHERE question_limit = 5")
+                )
+                if result.rowcount:
+                    logger.info(
+                        "Backfilled %s users from question_limit=5 (daily) to question_limit=2 (monthly)",
+                        result.rowcount,
+                    )
+        except Exception as e:
+            logger.warning("question_limit backfill skipped: %s", e)
         # Existing users keep working in English by default; new rows stay NULL
         # so the first-time language picker is shown on next /start.
         _ensure_sqlite_column_with_backfill(
@@ -88,7 +111,13 @@ def run_baseline_migrations(engine: Engine) -> None:
         _ensure_sqlite_column(engine, "subscriptions", "activated_at", "DATETIME")
         _ensure_sqlite_column(engine, "subscriptions", "cancelled_at", "DATETIME")
         _ensure_sqlite_column(engine, "subscriptions", "grace_until", "DATETIME")
+        # Failed-payment forensics (invoice.payment_failed handler).
+        _ensure_sqlite_column(engine, "subscriptions", "last_failed_payment_at", "DATETIME")
+        _ensure_sqlite_column(engine, "subscriptions", "last_failure_reason", "VARCHAR(255)")
+        _ensure_sqlite_column(engine, "subscriptions", "last_failure_event_id", "VARCHAR(255)")
         _ensure_sqlite_column(engine, "payments", "external_event_id", "VARCHAR(255)")
+        # Checkout URL persistence (double-payment reuse window).
+        _ensure_sqlite_column(engine, "checkout_sessions", "checkout_url", "VARCHAR(2048)")
 
     _ensure_index(engine, "ix_subscriptions_provider_customer_id", "subscriptions", "provider_customer_id")
     _ensure_index(engine, "ix_subscriptions_plan_code", "subscriptions", "plan_code")

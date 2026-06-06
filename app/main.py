@@ -43,11 +43,23 @@ def validate_startup_config() -> bool:
         logger.critical("CRITICAL: VIP_GROUP_ID is not set!")
         logger.critical("Please set VIP_GROUP_ID in your environment variables")
         return False
-    
+
+    # Stripe webhook secret is required for real-payment mode. In mock mode it
+    # is optional because no Stripe webhook will ever arrive.
+    if not config.mock_payment_enabled and not config.stripe_webhook_secret:
+        logger.critical("CRITICAL: STRIPE_WEBHOOK_SECRET is not configured")
+        logger.critical("Webhook processing cannot work without it")
+        logger.critical(
+            "Either set STRIPE_WEBHOOK_SECRET (from Stripe Dashboard → Developers → Webhooks) "
+            "or run with MOCK_PAYMENT_ENABLED=true."
+        )
+        return False
+
     logger.info("✅ Startup configuration validation passed")
     logger.info(f"MOCK_PAYMENT_ENABLED={config.mock_payment_enabled}")
     logger.info(f"STRIPE_SECRET_KEY loaded = {bool(config.stripe_secret_key)}")
     logger.info(f"STRIPE_PRICE_ID loaded = {bool(config.stripe_price_id)}")
+    logger.info(f"STRIPE_WEBHOOK_SECRET loaded = {bool(config.stripe_webhook_secret)}")
     return True
 
 

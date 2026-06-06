@@ -38,6 +38,9 @@ def _entitlement_denial_user_message(expl: EntitlementExplanation, user) -> str:
     return t_user(user, "q.subscription_inactive")
 
 
+MAX_QUESTION_LENGTH = 200
+
+
 async def validate_question_content(question_text: str, message: Message, user) -> bool:
     """Validate question content for minimum requirements."""
     try:
@@ -50,6 +53,13 @@ async def validate_question_content(question_text: str, message: Message, user) 
         meaningful_chars = len(question_text.replace(" ", "").replace("\n", "").replace("\t", ""))
         if meaningful_chars < 3:
             await message.answer(t_user(user, "q.too_short"))
+            return False
+
+        # Enforce maximum question length (client spec: 200 chars).
+        if len(question_text) > MAX_QUESTION_LENGTH:
+            await message.answer(
+                t_user(user, "q.too_long", limit=MAX_QUESTION_LENGTH, length=len(question_text))
+            )
             return False
 
         # Check for obvious spam patterns

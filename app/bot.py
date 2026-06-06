@@ -80,7 +80,7 @@ async def setup_bot() -> None:
     logger.info("Setting up bot handlers...")
     
     # Import and register handlers here
-    from .handlers import start, verify, access, subscription_cmd, admin, group_moderation, questions, admin_panel, language
+    from .handlers import start, verify, access, subscription_cmd, admin, group_moderation, questions, admin_panel, language, user_menu
 
     # Register all routers (order matters - first matching handler wins)
     logger.info("Registering routers in order:")
@@ -105,6 +105,8 @@ async def setup_bot() -> None:
     dp.include_router(access.router)
     logger.info("3b. subscription_cmd.router")
     dp.include_router(subscription_cmd.router)
+    logger.info("3c. user_menu.router")
+    dp.include_router(user_menu.router)
     logger.info("4. admin.router")
     dp.include_router(admin.router)
     logger.info("5. start.router")

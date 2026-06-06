@@ -9,8 +9,9 @@ class SubscriptionStatus(str, Enum):
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
     GRACE = "GRACE"
+    PAST_DUE = "PAST_DUE"  # payment failed, inside grace window — keep access
     EXPIRED = "EXPIRED"
-    CANCELLED = "CANCELLED"
+    CANCELLED = "CANCELLED"  # user cancelled; access continues until end_date
     PENDING_PAYMENT = "PENDING_PAYMENT"
     SUSPENDED = "SUSPENDED"
 
@@ -52,6 +53,10 @@ class Subscription(Base):
     activated_at = Column(DateTime, nullable=True)
     cancelled_at = Column(DateTime, nullable=True)
     grace_until = Column(DateTime, nullable=True)
+    # Last failed-payment forensics (populated by invoice.payment_failed).
+    last_failed_payment_at = Column(DateTime, nullable=True)
+    last_failure_reason = Column(String(255), nullable=True)
+    last_failure_event_id = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

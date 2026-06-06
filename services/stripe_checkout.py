@@ -11,6 +11,7 @@ Reads credentials from `app.config.config` (single source of truth).
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Optional
 
 import stripe
@@ -18,16 +19,60 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import config
-from database.crud import create_checkout_session_record
+from database.crud import (
+    create_checkout_session_record,
+    get_latest_checkout_for_user,
+    mark_checkout_expired,
+)
+from database.models_checkout import CheckoutSession, CheckoutSessionStatus
 
 logger = logging.getLogger(__name__)
 
 SUCCESS_URL = "https://askbot-uu5o.onrender.com/payment-success"
 CANCEL_URL = "https://askbot-uu5o.onrender.com/payment-cancel"
 
+# Window during which a CREATED CheckoutSession is reused instead of creating
+# a new one. Stripe sessions live ~24h server-side; the 30-minute cap keeps
+# users from accumulating multiple parallel Stripe Subscriptions if they tap
+# /subscribe repeatedly.
+CHECKOUT_REUSE_WINDOW_SECONDS = 30 * 60
+
 
 class StripeCheckoutConfigError(RuntimeError):
     """Raised when Stripe env vars required to build a Checkout Session are missing."""
+
+
+def get_reusable_checkout(
+    db: Session,
+    telegram_id: int,
+    *,
+    reuse_window_seconds: int = CHECKOUT_REUSE_WINDOW_SECONDS,
+) -> Optional[CheckoutSession]:
+    """Return a fresh CREATED CheckoutSession for this user if one exists.
+
+    If the latest CREATED row is past the reuse window, mark it EXPIRED and
+    return None — the caller should then create a brand-new Stripe session.
+    Returns None when there is nothing to reuse and nothing to expire.
+    """
+    row = get_latest_checkout_for_user(db, telegram_id)
+    if row is None:
+        return None
+    if row.status != CheckoutSessionStatus.CREATED.value:
+        return None
+    if not row.checkout_url:
+        # Legacy row from before the URL column existed; can't hand it back.
+        return None
+    age = (datetime.utcnow() - row.created_at).total_seconds()
+    if age < reuse_window_seconds:
+        return row
+    mark_checkout_expired(db, stripe_session_id=row.stripe_session_id)
+    logger.info(
+        "checkout_session_expired_stale telegram_id=%s stripe_session_id=%s age_seconds=%.0f",
+        telegram_id,
+        row.stripe_session_id,
+        age,
+    )
+    return None
 
 
 def create_checkout_session(telegram_id: int, db: Session) -> str:
@@ -77,6 +122,7 @@ def create_checkout_session(telegram_id: int, db: Session) -> str:
             db,
             telegram_id=telegram_id,
             stripe_session_id=session.id,
+            checkout_url=session.url,
         )
         logger.info(
             "checkout_session_stored telegram_id=%s session_id=%s",

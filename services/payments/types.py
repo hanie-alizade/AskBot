@@ -3,6 +3,7 @@ Payment provider common DTOs.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional, Dict, Any
 
 
@@ -27,3 +28,9 @@ class NormalizedPaymentEvent:
     external_subscription_id: Optional[str] = None
     external_customer_id: Optional[str] = None
     raw_payload: Optional[Dict[str, Any]] = None
+    # Stripe-authoritative billing period boundaries. Used to set
+    # subscription.start_date / end_date instead of a local now+30d guess.
+    period_start: Optional[datetime] = None
+    period_end: Optional[datetime] = None
+    # Failure forensics for invoice.payment_failed.
+    failure_reason: Optional[str] = None

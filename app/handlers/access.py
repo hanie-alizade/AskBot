@@ -45,6 +45,18 @@ async def handle_request_access_callback(callback: CallbackQuery) -> None:
             )
             return
 
+        # Legal-acceptance gate (defense-in-depth — the /start flow already
+        # blocks NEW→VERIFIED until all four are accepted, but bumped versions
+        # invalidate prior acceptance).
+        from services.legal_documents import has_accepted_all
+
+        if not has_accepted_all(user):
+            await callback.answer(
+                t_user(user, "legal.gate_message"),
+                show_alert=True,
+            )
+            return
+
         # Check if user already has a pending request
         if user.status == "PENDING_APPROVAL":
             await callback.answer(

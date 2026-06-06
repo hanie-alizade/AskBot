@@ -94,61 +94,69 @@ def get_user_count_by_status(db: Session) -> dict:
     return counts
 
 
+def _is_new_month(last: Optional[datetime], now: datetime) -> bool:
+    """True if last and now fall in different calendar months (or last is None)."""
+    if last is None:
+        return True
+    return (last.year, last.month) != (now.year, now.month)
+
+
 def increment_question_usage(db: Session, telegram_id: int) -> bool:
-    """Increment user's daily question usage."""
-    
+    """Increment user's VIP Legal question usage. Resets monthly."""
+
     user = get_user(db, telegram_id)
     if not user:
         return False
-    
-    today = datetime.now().date()
-    
-    # Reset daily counter if it's a new day
-    if user.last_question_date and user.last_question_date.date() < today:
+
+    now = datetime.now()
+
+    if _is_new_month(user.last_question_date, now):
         user.questions_used = 1
-        user.last_question_date = datetime.now()
+        user.last_question_date = now
     else:
-        # Check if user has reached daily limit
         if user.questions_used >= user.question_limit:
-            logger.warning(f"User {telegram_id} has reached daily question limit")
+            logger.warning(
+                "User %s has reached monthly VIP Legal question limit", telegram_id
+            )
             return False
-        
         user.questions_used += 1
-        user.last_question_date = datetime.now()
-    
+        user.last_question_date = now
+
     db.commit()
     db.refresh(user)
-    
-    logger.info(f"User {telegram_id} question usage: {user.questions_used}/{user.question_limit}")
+
+    logger.info(
+        "User %s monthly VIP Legal usage: %s/%s",
+        telegram_id, user.questions_used, user.question_limit,
+    )
     return True
 
 
 def increment_question_usage_no_commit(db: Session, user) -> bool:
-    """Increment user's question usage without committing (for atomic transactions)."""
-    
+    """Increment user's VIP Legal question usage in-transaction. Resets monthly."""
+
     if not user:
-        logger.error(f"User object not provided for question usage increment")
+        logger.error("User object not provided for question usage increment")
         return False
-    
-    today = datetime.now().date()
-    
-    # Reset daily counter if it's a new day
-    if user.last_question_date and user.last_question_date.date() < today:
+
+    now = datetime.now()
+
+    if _is_new_month(user.last_question_date, now):
         user.questions_used = 1
-        user.last_question_date = datetime.now()
+        user.last_question_date = now
     else:
-        # Check if user has reached daily limit
         if user.questions_used >= user.question_limit:
-            logger.warning(f"User {user.telegram_id} has reached daily question limit")
+            logger.warning(
+                "User %s has reached monthly VIP Legal question limit", user.telegram_id
+            )
             return False
-        
         user.questions_used += 1
-        user.last_question_date = datetime.now()
-    
-    # Don't commit here - let caller handle commit for atomic transaction
-    # No refresh needed - user object is already updated in this session
-    
-    logger.info(f"User {user.telegram_id} question usage incremented: {user.questions_used}/{user.question_limit}")
+        user.last_question_date = now
+
+    logger.info(
+        "User %s monthly VIP Legal usage incremented: %s/%s",
+        user.telegram_id, user.questions_used, user.question_limit,
+    )
     return True
 
 
@@ -609,6 +617,7 @@ def create_checkout_session_record(
     *,
     telegram_id: int,
     stripe_session_id: str,
+    checkout_url: Optional[str] = None,
 ) -> "CheckoutSession":
     """Insert a CheckoutSession row in CREATED state.
 
@@ -621,11 +630,68 @@ def create_checkout_session_record(
         telegram_id=telegram_id,
         stripe_session_id=stripe_session_id,
         status=CheckoutSessionStatus.CREATED.value,
+        checkout_url=checkout_url,
     )
     db.add(row)
     db.commit()
     db.refresh(row)
     return row
+
+
+def get_latest_checkout_for_user(
+    db: Session, telegram_id: int
+) -> Optional["CheckoutSession"]:
+    """Most recent CheckoutSession row for this telegram_id, any status."""
+    from database.models_checkout import CheckoutSession
+
+    return (
+        db.query(CheckoutSession)
+        .filter(CheckoutSession.telegram_id == telegram_id)
+        .order_by(CheckoutSession.id.desc())
+        .first()
+    )
+
+
+def mark_checkout_expired(db: Session, *, stripe_session_id: str) -> bool:
+    """Move a CheckoutSession to EXPIRED. Idempotent."""
+    from database.models_checkout import CheckoutSession, CheckoutSessionStatus
+
+    row = get_checkout_by_stripe_session_id(db, stripe_session_id)
+    if not row:
+        return False
+    if row.status == CheckoutSessionStatus.CREATED.value:
+        row.status = CheckoutSessionStatus.EXPIRED.value
+        db.commit()
+    return True
+
+
+def expire_stale_checkout_sessions(
+    db: Session, *, older_than: datetime, limit: int = 500
+) -> int:
+    """Bulk-mark CREATED checkouts older than the cutoff as EXPIRED.
+
+    Returns the number of rows updated. Intended for periodic maintenance —
+    not called from the request path. Operators can run this from an admin
+    job to clean up abandoned checkouts.
+    """
+    from database.models_checkout import CheckoutSession, CheckoutSessionStatus
+
+    rows = (
+        db.query(CheckoutSession)
+        .filter(
+            CheckoutSession.status == CheckoutSessionStatus.CREATED.value,
+            CheckoutSession.created_at < older_than,
+        )
+        .order_by(CheckoutSession.id.asc())
+        .limit(limit)
+        .all()
+    )
+    if not rows:
+        return 0
+    for row in rows:
+        row.status = CheckoutSessionStatus.EXPIRED.value
+    db.commit()
+    return len(rows)
 
 
 def get_checkout_by_stripe_session_id(

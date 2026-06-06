@@ -39,10 +39,19 @@ class BotConfig:
         self.stripe_secret_key: str = self._get_optional_env("STRIPE_SECRET_KEY", "")
         self.stripe_price_id: str = self._get_optional_env("STRIPE_PRICE_ID", "")
         self.stripe_webhook_secret: str = self._get_optional_env("STRIPE_WEBHOOK_SECRET", "")
+        # Where Stripe redirects users after they close the Customer Portal.
+        self.stripe_portal_return_url: str = self._get_optional_env(
+            "STRIPE_PORTAL_RETURN_URL",
+            "https://askbot-uu5o.onrender.com/payment-success",
+        )
         self.checkout_base_url: str = self._get_optional_env("CHECKOUT_BASE_URL", "https://example.com")
         # VIP: remove from group this many seconds after subscription stops being ACTIVE/valid GRACE (default 2 days).
         self.vip_subscription_lapse_removal_delay_seconds: int = int(
             self._get_optional_env("VIP_SUBSCRIPTION_LAPSE_REMOVAL_DELAY_SECONDS", "172800")
+        )
+        # How many days of grace we extend after a failed renewal payment (PAST_DUE → access kept).
+        self.subscription_past_due_grace_days: int = int(
+            self._get_optional_env("SUBSCRIPTION_PAST_DUE_GRACE_DAYS", "3")
         )
         # How often the bot reconciles VIP bans / renewals (unban + re-invite).
         self.vip_membership_sync_interval_seconds: int = int(

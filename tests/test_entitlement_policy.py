@@ -12,7 +12,13 @@ from database.models_subscription import Subscription, SubscriptionPlan, Subscri
 from services.entitlement_policy import EntitlementPolicy
 
 
-def _user(status: str, subscription=None) -> User:
+def _user(status: str, subscription=None, *, legal_accepted: bool = True) -> User:
+    """Build a test User.
+
+    legal_accepted=True (the default) stamps every required legal document with
+    the current version so the entitlement gate added by services/legal_documents
+    does not deny these subscription-matrix tests.
+    """
     u = User(
         id=1,
         telegram_id=100,
@@ -21,6 +27,11 @@ def _user(status: str, subscription=None) -> User:
         status=status,
     )
     u.subscription = subscription
+    if legal_accepted:
+        from services.legal_documents import REQUIRED_DOCUMENTS, mark_accepted
+
+        for doc in REQUIRED_DOCUMENTS:
+            mark_accepted(u, doc)
     return u
 
 

@@ -16,6 +16,7 @@ No business logic lives here; everything is delegated to:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 import stripe
@@ -43,6 +44,8 @@ app = FastAPI(title="AskBot HTTP server")
 _HANDLED_STRIPE_EVENTS = {
     "checkout.session.completed",
     "invoice.paid",
+    "invoice.payment_failed",
+    "customer.subscription.updated",
     "customer.subscription.deleted",
 }
 
@@ -137,6 +140,82 @@ def _normalize_amount(stripe_obj: dict) -> Optional[float]:
     return (float(cents) / 100.0) if cents is not None else None
 
 
+def _ts_to_datetime(ts: Optional[int]) -> Optional[datetime]:
+    """Stripe sends Unix timestamps; convert to naive UTC for our DB columns.
+
+    The rest of the codebase uses `datetime.utcnow()` (naive UTC), so we strip
+    tzinfo after converting to keep comparisons consistent.
+    """
+    if ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _invoice_period(invoice_obj: dict) -> tuple[Optional[datetime], Optional[datetime]]:
+    """Pull the billing period from a Stripe invoice object.
+
+    Invoices put the canonical period on the first line item; some webhook
+    payloads also set period_start/period_end on the invoice root. We try both.
+    """
+    lines = (invoice_obj.get("lines") or {}).get("data") or []
+    if lines:
+        period = lines[0].get("period") or {}
+        ps = _ts_to_datetime(period.get("start"))
+        pe = _ts_to_datetime(period.get("end"))
+        if ps or pe:
+            return ps, pe
+    return (
+        _ts_to_datetime(invoice_obj.get("period_start")),
+        _ts_to_datetime(invoice_obj.get("period_end")),
+    )
+
+
+def _fetch_subscription_period(
+    stripe_subscription_id: Optional[str],
+) -> tuple[Optional[datetime], Optional[datetime]]:
+    """Fetch current_period_start / current_period_end from Stripe by sub ID.
+
+    Returns (None, None) if the call fails or the subscription cannot be read.
+    Stripe's Checkout Session event does not include period dates, so we look
+    them up here.
+    """
+    if not stripe_subscription_id or not config.stripe_secret_key:
+        return None, None
+    try:
+        stripe.api_key = config.stripe_secret_key
+        sub = stripe.Subscription.retrieve(stripe_subscription_id)
+        return (
+            _ts_to_datetime(sub.get("current_period_start")),
+            _ts_to_datetime(sub.get("current_period_end")),
+        )
+    except Exception as e:
+        logger.warning(
+            "stripe_subscription_retrieve_failed subscription_id=%s err=%s",
+            stripe_subscription_id,
+            e,
+        )
+        return None, None
+
+
+def _failure_reason_from_invoice(invoice_obj: dict) -> Optional[str]:
+    """Best-effort extraction of why a payment failed."""
+    # Invoice-level fields.
+    msg = invoice_obj.get("last_finalization_error") or {}
+    if isinstance(msg, dict) and msg.get("message"):
+        return str(msg["message"])
+    # Charge-level failure if present.
+    charge = invoice_obj.get("charge")
+    if isinstance(charge, dict):
+        if charge.get("failure_message"):
+            return str(charge["failure_message"])
+        if charge.get("failure_code"):
+            return str(charge["failure_code"])
+    return None
+
+
 def _build_event(
     *,
     event_id: str,
@@ -144,6 +223,9 @@ def _build_event(
     user_id: int,
     status: str,
     stripe_obj: dict,
+    period_start: Optional[datetime] = None,
+    period_end: Optional[datetime] = None,
+    failure_reason: Optional[str] = None,
 ) -> NormalizedPaymentEvent:
     return NormalizedPaymentEvent(
         event_id=event_id,
@@ -157,6 +239,9 @@ def _build_event(
         external_subscription_id=stripe_obj.get("subscription") or stripe_obj.get("id"),
         external_customer_id=stripe_obj.get("customer"),
         raw_payload=stripe_obj,
+        period_start=period_start,
+        period_end=period_end,
+        failure_reason=failure_reason,
     )
 
 
@@ -199,6 +284,9 @@ async def stripe_webhook(request: Request) -> dict:
     internal_event_type = event_type
     status = "PENDING"
     stripe_session_id: Optional[str] = None
+    period_start: Optional[datetime] = None
+    period_end: Optional[datetime] = None
+    failure_reason: Optional[str] = None
 
     db = SessionLocal()
     activation_ok = False
@@ -267,6 +355,10 @@ async def stripe_webhook(request: Request) -> dict:
                     telegram_id,
                     event_id,
                 )
+            # Session object has no period dates — fetch from Stripe Subscription API.
+            period_start, period_end = _fetch_subscription_period(
+                stripe_obj.get("subscription")
+            )
             status = "PAID"
 
         elif event_type == "invoice.paid":
@@ -287,13 +379,58 @@ async def stripe_webhook(request: Request) -> dict:
                     "reason": "duplicate_first_invoice",
                 }
             telegram_id = _resolve_telegram_id_by_subscription(db, stripe_sub_id)
+            period_start, period_end = _invoice_period(stripe_obj)
             status = "PAID"
+
+        elif event_type == "invoice.payment_failed":
+            stripe_sub_id = stripe_obj.get("subscription")
+            telegram_id = _resolve_telegram_id_by_subscription(db, stripe_sub_id)
+            internal_event_type = "invoice.payment_failed"
+            status = "FAILED"
+            failure_reason = _failure_reason_from_invoice(stripe_obj)
+            # Prefer Stripe's next_payment_attempt as the grace cliff; fall back
+            # to None so SubscriptionService applies the configured grace window.
+            period_end = _ts_to_datetime(stripe_obj.get("next_payment_attempt"))
+
+        elif event_type == "customer.subscription.updated":
+            # Source of truth for current_period_end; we mirror it onto our row.
+            stripe_sub_id = stripe_obj.get("id")
+            telegram_id = _resolve_telegram_id_by_subscription(db, stripe_sub_id)
+            period_start = _ts_to_datetime(stripe_obj.get("current_period_start"))
+            period_end = _ts_to_datetime(stripe_obj.get("current_period_end"))
+            stripe_status = stripe_obj.get("status")
+            # Map Stripe sub status onto our internal event types where useful.
+            if stripe_status == "past_due":
+                internal_event_type = "invoice.payment_failed"
+                status = "FAILED"
+            elif stripe_status in {"active", "trialing"}:
+                # Keep dates fresh by treating as a renewal-shaped event.
+                internal_event_type = "subscription.renewed"
+                status = "PAID"
+            elif stripe_status in {"canceled", "incomplete_expired", "unpaid"}:
+                internal_event_type = "subscription.cancelled"
+                status = "CANCELLED"
+            else:
+                logger.info(
+                    "customer.subscription.updated ignored stripe_status=%s "
+                    "subscription_id=%s event_id=%s",
+                    stripe_status,
+                    stripe_sub_id,
+                    event_id,
+                )
+                return {
+                    "received": True,
+                    "handled": False,
+                    "reason": f"sub_status_ignored:{stripe_status}",
+                }
 
         elif event_type == "customer.subscription.deleted":
             # Stripe subscription id is the object id itself.
             telegram_id = _resolve_telegram_id_by_subscription(
                 db, stripe_obj.get("id")
             )
+            # Keep access until current_period_end (user paid for the period).
+            period_end = _ts_to_datetime(stripe_obj.get("current_period_end"))
             internal_event_type = "subscription.cancelled"
             status = "CANCELLED"
 
@@ -323,6 +460,9 @@ async def stripe_webhook(request: Request) -> dict:
             user_id=telegram_id,
             status=status,
             stripe_obj=stripe_obj,
+            period_start=period_start,
+            period_end=period_end,
+            failure_reason=failure_reason,
         )
 
         svc = SubscriptionService(db)

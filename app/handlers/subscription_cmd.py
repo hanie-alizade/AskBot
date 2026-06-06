@@ -22,7 +22,12 @@ from services.subscription_readout import (
 )
 from services.payments.factory import build_payment_gateway
 from services.payments.webhook_service import WebhookService
-from services.stripe_checkout import StripeCheckoutConfigError, create_checkout_session
+from services.stripe_checkout import (
+    StripeCheckoutConfigError,
+    create_checkout_session,
+    get_reusable_checkout,
+)
+from services.stripe_portal import StripePortalConfigError, create_customer_portal_session
 from services.vip_invite import notify_vip_invite_if_eligible
 
 logger = logging.getLogger(__name__)
@@ -75,6 +80,14 @@ async def handle_subscribe_or_renew(message: Message) -> None:
             await message.answer(t_user(user, "sub.cmd_not_approved"))
             return
 
+        # Legal-acceptance gate (defense-in-depth). Required for paid customers.
+        from services.legal_documents import has_accepted_all
+
+        if not has_accepted_all(user):
+            await message.answer(t_user(user, "legal.gate_message"))
+            logger.info("subscribe_cmd legal_consent_missing user_id=%s", user_id)
+            return
+
         if config.mock_payment_enabled:
             logger.info("ENTERING MOCK PAYMENT FLOW")
             gateway = build_payment_gateway()
@@ -89,8 +102,25 @@ async def handle_subscribe_or_renew(message: Message) -> None:
             return
 
         logger.info("ENTERING STRIPE CHECKOUT FLOW")
+
+        # Double-payment guard: if the user has an active CREATED checkout
+        # within the reuse window, hand the same URL back instead of opening
+        # a second parallel Stripe Subscription.
+        reusable = get_reusable_checkout(db, telegram_id=user_id)
+        if reusable is not None:
+            logger.info(
+                "ACTIVE CHECKOUT REUSED telegram_id=%s stripe_session_id=%s",
+                user_id,
+                reusable.stripe_session_id,
+            )
+            await message.answer(
+                "💳 You already have an active payment session.\n"
+                "Please complete it or wait until it expires.\n\n"
+                f"{reusable.checkout_url}"
+            )
+            return
+
         # Real path: create a Stripe Checkout Session and send the URL to the user.
-        # Webhook handling / subscription activation are not implemented yet.
         try:
             checkout_url = create_checkout_session(telegram_id=user_id, db=db)
         except StripeCheckoutConfigError as e:
@@ -111,5 +141,67 @@ async def handle_subscribe_or_renew(message: Message) -> None:
             f"{checkout_url}"
         )
         logger.info("subscribe_cmd stripe user_id=%s", user_id)
+    finally:
+        db.close()
+
+
+@router.message(Command("manage_subscription"))
+async def handle_manage_subscription(message: Message) -> None:
+    """Open the Stripe Customer Portal so the user can self-manage their sub."""
+    if message.chat.type != ChatType.PRIVATE:
+        return
+
+    user_id = message.from_user.id
+    logger.info("MANAGE_SUBSCRIPTION COMMAND RECEIVED telegram_id=%s", user_id)
+
+    db = SessionLocal()
+    try:
+        user = get_user(db, user_id)
+        if not user or user.status != "APPROVED":
+            await message.answer(t_user(user, "sub.cmd_not_approved"))
+            return
+
+        sub = getattr(user, "subscription", None)
+        customer_id = sub.provider_customer_id if sub else None
+        if not customer_id:
+            await message.answer("Subscription portal is not available yet.")
+            logger.info(
+                "manage_subscription no_customer telegram_id=%s", user_id
+            )
+            return
+
+        try:
+            portal_url = create_customer_portal_session(
+                customer_id,
+                return_url=config.stripe_portal_return_url,
+            )
+        except StripePortalConfigError as e:
+            logger.error(
+                "manage_subscription portal_config_error telegram_id=%s err=%s",
+                user_id,
+                e,
+            )
+            await message.answer(
+                "⚠️ Subscription portal is not configured yet. Please try again later."
+            )
+            return
+        except Exception as e:
+            logger.exception(
+                "manage_subscription stripe_error telegram_id=%s err=%s", user_id, e
+            )
+            await message.answer(
+                "⚠️ We couldn't open the subscription portal right now. Please try again in a moment."
+            )
+            return
+
+        logger.info(
+            "CUSTOMER PORTAL OPENED telegram_id=%s customer_id=%s",
+            user_id,
+            customer_id,
+        )
+        await message.answer(
+            "🔧 Manage your subscription (update card, change billing info, or cancel):\n\n"
+            f"{portal_url}"
+        )
     finally:
         db.close()

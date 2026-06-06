@@ -6,12 +6,19 @@ Handles subscription business logic and lifecycle management.
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
+from app.config import config
 from database.models import User
 from database.models_subscription import Subscription, Payment, SubscriptionStatus, PaymentStatus, SubscriptionPlan, PaymentProvider
 from services.payments.types import NormalizedPaymentEvent
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# Local fallback used only when Stripe events arrive without period info.
+# Real Stripe events always include current_period_end, so this is a safety
+# net for mock/test paths and edge cases.
+_FALLBACK_PERIOD_DAYS = 30
 
 
 def _vip_hook_after_subscription_change(db: Session, user_id: int) -> None:
@@ -237,25 +244,114 @@ class SubscriptionService:
                     event.external_subscription_id or subscription.external_subscription_id
                 )
 
+                now = datetime.utcnow()
+
                 if event.event_type in {"payment.succeeded", "checkout.session.completed", "invoice.paid"}:
-                    now = datetime.utcnow()
+                    # Use Stripe-provided period dates when present; fall back
+                    # to a 30-day window only for mock/test paths.
+                    period_start = event.period_start or subscription.start_date or now
+                    period_end = event.period_end or (now + timedelta(days=_FALLBACK_PERIOD_DAYS))
+
+                    is_renewal = (
+                        subscription.status == SubscriptionStatus.ACTIVE.value
+                        and subscription.activated_at is not None
+                    )
+
                     subscription.status = SubscriptionStatus.ACTIVE
-                    subscription.activated_at = now
-                    subscription.start_date = subscription.start_date or now
-                    subscription.end_date = now + timedelta(days=30)
-                    subscription.grace_until = subscription.end_date + timedelta(days=3)
+                    subscription.activated_at = subscription.activated_at or now
+                    subscription.start_date = period_start
+                    subscription.end_date = period_end
+                    subscription.grace_until = period_end + timedelta(
+                        days=config.subscription_past_due_grace_days
+                    )
+                    # Clear failure forensics on a successful payment.
+                    subscription.last_failed_payment_at = None
+                    subscription.last_failure_reason = None
+                    subscription.last_failure_event_id = None
+
+                    if is_renewal:
+                        logger.info(
+                            "SUBSCRIPTION RENEWED telegram_id=%s subscription_id=%s "
+                            "stripe_event_id=%s period_end=%s",
+                            event.user_id,
+                            subscription.external_subscription_id,
+                            event.event_id,
+                            period_end.isoformat(),
+                        )
+                    else:
+                        logger.info(
+                            "SUBSCRIPTION ACTIVATED telegram_id=%s subscription_id=%s "
+                            "stripe_event_id=%s period_end=%s",
+                            event.user_id,
+                            subscription.external_subscription_id,
+                            event.event_id,
+                            period_end.isoformat(),
+                        )
+
                 elif event.event_type in {"payment.failed", "invoice.payment_failed"}:
-                    subscription.status = SubscriptionStatus.INACTIVE
+                    # PAST_DUE: keep access until grace_until expires. Stripe
+                    # supplies next_payment_attempt sometimes; fall back to
+                    # a config-driven grace from the failure time.
+                    grace_until = event.period_end or (
+                        now + timedelta(days=config.subscription_past_due_grace_days)
+                    )
+                    subscription.status = SubscriptionStatus.PAST_DUE
+                    subscription.grace_until = grace_until
+                    subscription.last_failed_payment_at = now
+                    subscription.last_failure_reason = (event.failure_reason or "")[:255] or None
+                    subscription.last_failure_event_id = event.event_id
+
+                    logger.warning(
+                        "PAYMENT FAILED telegram_id=%s subscription_id=%s "
+                        "stripe_event_id=%s grace_until=%s reason=%s",
+                        event.user_id,
+                        subscription.external_subscription_id,
+                        event.event_id,
+                        grace_until.isoformat(),
+                        event.failure_reason,
+                    )
+
                 elif event.event_type in {"subscription.renewed"}:
-                    now = datetime.utcnow()
+                    # Legacy mock path; real Stripe renewals come via invoice.paid above.
+                    period_end = event.period_end or (now + timedelta(days=_FALLBACK_PERIOD_DAYS))
                     subscription.status = SubscriptionStatus.ACTIVE
-                    subscription.end_date = now + timedelta(days=30)
-                    subscription.grace_until = subscription.end_date + timedelta(days=3)
+                    subscription.end_date = period_end
+                    subscription.grace_until = period_end + timedelta(
+                        days=config.subscription_past_due_grace_days
+                    )
+                    logger.info(
+                        "SUBSCRIPTION RENEWED telegram_id=%s subscription_id=%s "
+                        "stripe_event_id=%s period_end=%s (mock)",
+                        event.user_id,
+                        subscription.external_subscription_id,
+                        event.event_id,
+                        period_end.isoformat(),
+                    )
+
                 elif event.event_type in {"subscription.cancelled"}:
+                    # User cancelled — DO NOT remove access immediately. Stripe's
+                    # current_period_end on the deleted event is the access cliff.
                     subscription.status = SubscriptionStatus.CANCELLED
-                    subscription.cancelled_at = datetime.utcnow()
+                    subscription.cancelled_at = now
+                    if event.period_end:
+                        subscription.end_date = event.period_end
+                    logger.info(
+                        "SUBSCRIPTION CANCELLED telegram_id=%s subscription_id=%s "
+                        "stripe_event_id=%s access_until=%s",
+                        event.user_id,
+                        subscription.external_subscription_id,
+                        event.event_id,
+                        (subscription.end_date.isoformat() if subscription.end_date else "<unset>"),
+                    )
+
                 elif event.event_type in {"subscription.expired"}:
                     subscription.status = SubscriptionStatus.EXPIRED
+                    logger.info(
+                        "SUBSCRIPTION EXPIRED telegram_id=%s subscription_id=%s stripe_event_id=%s",
+                        event.user_id,
+                        subscription.external_subscription_id,
+                        event.event_id,
+                    )
 
             self.db.commit()
             logger.info("Processed payment event %s for user %s", event.event_id, event.user_id)
@@ -421,3 +517,55 @@ class SubscriptionService:
             detail=f"grace_days={grace_days}",
         )
         return ok
+
+    def sweep_lapsed_subscriptions(self) -> int:
+        """Flip stale CANCELLED / PAST_DUE rows to EXPIRED when their windows close.
+
+        - CANCELLED + end_date <= now → EXPIRED (user cancelled, period ended)
+        - PAST_DUE  + grace_until <= now → EXPIRED (failed payment, grace ran out)
+
+        Returns the number of rows flipped. Idempotent: called from the periodic
+        VIP reconciliation loop. VIP-side ban / DM is handled by the existing
+        membership reconciler once entitlement flips to DENY.
+        """
+        now = datetime.utcnow()
+        flipped = 0
+
+        cancelled_due = (
+            self.db.query(Subscription)
+            .filter(
+                Subscription.status == SubscriptionStatus.CANCELLED,
+                Subscription.end_date.isnot(None),
+                Subscription.end_date <= now,
+            )
+            .all()
+        )
+        past_due_done = (
+            self.db.query(Subscription)
+            .filter(
+                Subscription.status == SubscriptionStatus.PAST_DUE,
+                Subscription.grace_until.isnot(None),
+                Subscription.grace_until <= now,
+            )
+            .all()
+        )
+
+        for sub in cancelled_due + past_due_done:
+            prev_status = sub.status
+            sub.status = SubscriptionStatus.EXPIRED
+            sub.updated_at = now
+            flipped += 1
+            logger.info(
+                "SUBSCRIPTION EXPIRED telegram_id=%s subscription_id=%s "
+                "previous_status=%s subscription_db_id=%s",
+                sub.user_id,
+                sub.external_subscription_id,
+                prev_status,
+                sub.id,
+            )
+
+        if flipped:
+            self.db.commit()
+            for sub in cancelled_due + past_due_done:
+                _vip_hook_after_subscription_change(self.db, sub.user_id)
+        return flipped

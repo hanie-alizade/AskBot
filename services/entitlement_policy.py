@@ -115,9 +115,51 @@ class EntitlementPolicy:
                 grace_valid=False,
             )
 
+        if sub.status == SubscriptionStatus.PAST_DUE:
+            # Failed renewal payment, but we extend access until grace_until.
+            grace_ok = bool(sub.grace_until and sub.grace_until > now)
+            if grace_ok:
+                return EntitlementExplanation(
+                    decision="ALLOW",
+                    reason="payment_past_due_grace",
+                    allows_questions=True,
+                    subscription_status=sub_status,
+                    user_status=user.status,
+                    grace_valid=True,
+                )
+            return EntitlementExplanation(
+                decision="DENY",
+                reason="past_due_grace_expired",
+                allows_questions=False,
+                subscription_status=sub_status,
+                user_status=user.status,
+                grace_valid=False,
+            )
+
+        if sub.status == SubscriptionStatus.CANCELLED:
+            # User cancelled renewal, but they paid for the current period.
+            # Allow access until end_date, then deny.
+            within_paid_period = bool(sub.end_date and sub.end_date > now)
+            if within_paid_period:
+                return EntitlementExplanation(
+                    decision="ALLOW",
+                    reason="cancelled_within_paid_period",
+                    allows_questions=True,
+                    subscription_status=sub_status,
+                    user_status=user.status,
+                    grace_valid=False,
+                )
+            return EntitlementExplanation(
+                decision="DENY",
+                reason="subscription_cancelled",
+                allows_questions=False,
+                subscription_status=sub_status,
+                user_status=user.status,
+                grace_valid=False,
+            )
+
         terminal_deny_reasons = {
             SubscriptionStatus.EXPIRED: "subscription_expired",
-            SubscriptionStatus.CANCELLED: "subscription_cancelled",
             SubscriptionStatus.INACTIVE: "subscription_inactive",
             SubscriptionStatus.PENDING_PAYMENT: "subscription_pending_payment",
             SubscriptionStatus.SUSPENDED: "subscription_suspended",
@@ -178,6 +220,20 @@ class EntitlementPolicy:
                 grace_valid=False,
             )
 
+        # Legal acceptance gate: even approved users with valid subs are denied
+        # if they haven't accepted every required document at its current version.
+        from services.legal_documents import has_accepted_all  # local to avoid cycle
+
+        if not has_accepted_all(user):
+            return EntitlementExplanation(
+                decision="DENY",
+                reason="legal_consent_missing",
+                allows_questions=False,
+                subscription_status=sub_status,
+                user_status=user.status,
+                grace_valid=False,
+            )
+
         now = datetime.utcnow()
 
         if sub is not None:
@@ -217,6 +273,10 @@ class EntitlementPolicy:
             return bool(subscription.end_date and subscription.end_date > now)
         if subscription.status == SubscriptionStatus.GRACE:
             return bool(subscription.grace_until and subscription.grace_until > now)
+        if subscription.status == SubscriptionStatus.PAST_DUE:
+            return bool(subscription.grace_until and subscription.grace_until > now)
+        if subscription.status == SubscriptionStatus.CANCELLED:
+            return bool(subscription.end_date and subscription.end_date > now)
         return False
 
     def get_effective_question_limit(self, user: Optional[User]) -> float:

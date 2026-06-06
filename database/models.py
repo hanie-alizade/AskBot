@@ -32,10 +32,22 @@ class User(Base):
     # Preferred UI language. NULL = user has not picked yet (first-time picker shown).
     language = Column(String(8), nullable=True)
 
-    # Additional fields for future features
-    question_limit = Column(Integer, default=5)  # Daily question limit
-    questions_used = Column(Integer, default=0)     # Questions used today
-    last_question_date = Column(DateTime(timezone=True), nullable=True)  # Last question date
+    # VIP Legal question quota — per-month cap (per client document).
+    # last_question_date now tracks the month-of-last-quota-event, not the day.
+    question_limit = Column(Integer, default=2)
+    questions_used = Column(Integer, default=0)
+    last_question_date = Column(DateTime(timezone=True), nullable=True)
+
+    # Legal acceptance gates onboarding. NULL = not accepted.
+    # The version string lets us re-prompt when documents change.
+    disclaimer_accepted_at = Column(DateTime, nullable=True)
+    disclaimer_version = Column(String(32), nullable=True)
+    terms_accepted_at = Column(DateTime, nullable=True)
+    terms_version = Column(String(32), nullable=True)
+    privacy_accepted_at = Column(DateTime, nullable=True)
+    privacy_version = Column(String(32), nullable=True)
+    liability_accepted_at = Column(DateTime, nullable=True)
+    liability_version = Column(String(32), nullable=True)
     
     # Relationships
     subscription = relationship("Subscription", back_populates="user", uselist=False)

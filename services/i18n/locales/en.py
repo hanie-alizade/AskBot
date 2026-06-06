@@ -19,6 +19,21 @@ MESSAGES = {
         "👋 Welcome to AskBot!\n\n"
         "To get started, please verify your account by clicking the button below."
     ),
+
+    # ===== Legal acceptance flow =====
+    "legal.intro": (
+        "📄 <b>Onboarding — Legal acceptance</b>\n\n"
+        "Please review and accept each document below. "
+        "You must accept all four to continue."
+    ),
+    "legal.finalize_btn": "✅ All accepted — continue",
+    "legal.back_btn": "↩️ Back to documents",
+    "legal.alert_accepted": "Recorded ✅",
+    "legal.alert_incomplete": "Please accept all four documents to continue.",
+    "legal.gate_message": (
+        "📄 You must accept the legal documents before you can continue.\n\n"
+        "Send /start to open the acceptance flow."
+    ),
     "verify.welcome_verified": (
         "✅ You are verified!\n\n"
         "You can now request access to the VIP group by clicking the button below."
@@ -94,6 +109,12 @@ MESSAGES = {
     "help.approved_with_vip": (
         "Available commands:\n"
         "/start - Show approved status\n"
+        "/menu - Your dashboard\n"
+        "/benefits - Membership benefits\n"
+        "/rules - Community rules\n"
+        "/privacy - Privacy policy\n"
+        "/terms - Terms & Conditions\n"
+        "/disclaimer - Disclaimer\n"
         "/help - Show this help message\n"
         "/status - Check your current status\n"
         "/language - Change language\n\n"
@@ -102,6 +123,12 @@ MESSAGES = {
     "help.approved_billing": (
         "Available commands:\n"
         "/start - Show approved status\n"
+        "/menu - Your dashboard\n"
+        "/benefits - Membership benefits\n"
+        "/rules - Community rules\n"
+        "/privacy - Privacy policy\n"
+        "/terms - Terms & Conditions\n"
+        "/disclaimer - Disclaimer\n"
         "/help - Show this help message\n"
         "/status - Check your current status\n"
         "/language - Change language\n\n"
@@ -136,13 +163,18 @@ MESSAGES = {
         "❌ Question Too Short\n\n"
         "Please send a more detailed question (at least 3 characters)."
     ),
+    "q.too_long": (
+        "❌ Question Too Long\n\n"
+        "Please shorten your question to {limit} characters or fewer. "
+        "Your message is currently {length} characters."
+    ),
     "q.invalid": "❌ Invalid Question\n\nPlease send a meaningful question.",
     "q.cooldown": "⏳ Please Wait\n\nPlease wait a few seconds before sending another question.",
     "q.duplicate": "⚠️ Duplicate Question\n\nYou already sent this question recently.",
     "q.limit_reached": (
-        "❌ Question Limit Reached\n\n"
-        "You have used your daily limit of {limit} questions.\n\n"
-        "Your question count will reset tomorrow. Please try again then."
+        "❌ VIP Legal Question Limit Reached\n\n"
+        "You have used your monthly allowance of {limit} VIP Legal questions.\n\n"
+        "Your quota resets on the 1st of next month."
     ),
     "q.access_required_simple": (
         "❌ Access Required\n\n"
@@ -161,7 +193,7 @@ MESSAGES = {
     "q.received": (
         "✅ Question Received\n\n"
         "Your question has been sent to the admin.\n\n"
-        "📊 Remaining questions today: {remaining}/{limit}\n\n"
+        "📊 Remaining VIP Legal questions this month: {remaining}/{limit}\n\n"
         "You'll receive a response as soon as possible."
     ),
     "q.error_generic": "❌ Error\n\nThere was an error processing your question. Please try again.",

@@ -30,6 +30,7 @@ class CheckoutSessionStatus(str, Enum):
     COMPLETED = "COMPLETED"
     ACTIVATED = "ACTIVATED"
     CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"  # rolled past the reuse window without completion
 
 
 class CheckoutSession(Base):
@@ -41,6 +42,10 @@ class CheckoutSession(Base):
     # The Stripe Checkout Session ID (cs_test_… / cs_live_…). Unique constraint
     # is the primary defence against double webhook processing.
     stripe_session_id = Column(String(255), nullable=False, unique=True, index=True)
+
+    # Hosted Stripe Checkout URL, stored so /subscribe can hand the same link
+    # back to a user who taps /subscribe twice within the reuse window.
+    checkout_url = Column(String(2048), nullable=True)
 
     # Populated when checkout.session.completed arrives.
     stripe_subscription_id = Column(String(255), nullable=True, index=True)
