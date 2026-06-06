@@ -31,8 +31,10 @@ MESSAGES = {
     "legal.alert_accepted": "Recorded ✅",
     "legal.alert_incomplete": "Please accept all four documents to continue.",
     "legal.gate_message": (
-        "📄 You must accept the legal documents before you can continue.\n\n"
-        "Send /start to open the acceptance flow."
+        "📄 You must accept the legal documents before you can continue."
+    ),
+    "legal.gate_message_alert": (
+        "Please complete legal acceptance to continue. Tap below to resume."
     ),
     "verify.welcome_verified": (
         "✅ You are verified!\n\n"
@@ -181,6 +183,88 @@ MESSAGES = {
         "You need to be approved to ask questions.\n\n"
         "Please start the verification process by sending /start"
     ),
+
+    # ===== State-aware deny messages =====
+    # Used when the user has no row in our DB at all — they really do need to /start.
+    "q.deny_not_registered": (
+        "👋 Welcome!\n\n"
+        "You're not registered yet. Send /start to begin."
+    ),
+    # Legal acceptance missing during initial onboarding (no documents accepted yet).
+    "q.deny_legal_pending": (
+        "📄 <b>Legal Acceptance Required</b>\n\n"
+        "You must complete the legal acceptance process before continuing.\n\n"
+        "Tap the button below to resume where you left off."
+    ),
+    # Legal acceptance missing because a document version was bumped (some accepted).
+    "q.deny_legal_updated": (
+        "📄 <b>Updated Legal Documents</b>\n\n"
+        "We've updated one or more of our legal documents. "
+        "Please re-accept the latest versions to continue.\n\n"
+        "Tap the button below to resume."
+    ),
+    # user_not_approved + status=NEW (verified but didn't tap Verify yet — shouldn't happen,
+    # but be defensive).
+    "q.deny_new_user": (
+        "📄 <b>Onboarding Required</b>\n\n"
+        "Please complete the onboarding flow first. "
+        "Use /menu to see where you are, or send /start to resume."
+    ),
+    # user_not_approved + status=VERIFIED (accepted legals, has not requested access yet).
+    "q.deny_must_request_access": (
+        "✅ You're verified.\n\n"
+        "You still need to request access before you can ask questions. "
+        "Tap the button below."
+    ),
+    # user_not_approved + status=PENDING_APPROVAL.
+    "q.deny_pending_approval": (
+        "⏳ <b>Awaiting Admin Approval</b>\n\n"
+        "Your request has been submitted and is waiting for admin approval. "
+        "You'll be notified once a decision is made."
+    ),
+    # user_not_approved + status=REJECTED.
+    "q.deny_rejected": (
+        "❌ <b>Access Rejected</b>\n\n"
+        "Your access request was rejected. "
+        "If you believe this is a mistake, please contact an admin."
+    ),
+    # user_not_approved + unknown status (shouldn't happen — kept as a safety net).
+    "q.deny_unknown_status": (
+        "❌ Access Required\n\n"
+        "Your current status is {status}. "
+        "Use /menu to see your dashboard."
+    ),
+    # APPROVED but no subscription row at all → needs to subscribe.
+    "q.deny_no_subscription": (
+        "💳 <b>Subscription Required</b>\n\n"
+        "You're approved! To ask VIP Legal questions, please subscribe.\n\n"
+        "Use /subscribe to start your subscription."
+    ),
+    # APPROVED, has a sub, but it ended.
+    "q.deny_subscription_expired": (
+        "💳 <b>Subscription Expired</b>\n\n"
+        "Your subscription has expired. Use /subscribe to renew and restore access."
+    ),
+    # APPROVED, sub was CANCELLED and the paid period has now passed.
+    "q.deny_subscription_cancelled": (
+        "💳 <b>Subscription Cancelled</b>\n\n"
+        "Your subscription was cancelled and the paid period has ended. "
+        "Use /subscribe to start a new subscription."
+    ),
+    # APPROVED, sub in GRACE/PAST_DUE but grace window expired.
+    "q.deny_grace_expired": (
+        "💳 <b>Grace Period Ended</b>\n\n"
+        "Your payment grace period has ended. "
+        "Use /subscribe to restore access."
+    ),
+    # APPROVED, sub INACTIVE / PENDING_PAYMENT / SUSPENDED.
+    "q.deny_subscription_inactive": (
+        "💳 <b>Subscription Inactive</b>\n\n"
+        "Your subscription is not active. Use /subscribe to activate it."
+    ),
+    # ===== Buttons used by state-aware deny replies =====
+    "btn.resume_legal": "📄 Resume Legal Acceptance",
+    "btn.request_access_now": "🔑 Request Access",
     "q.system_error": (
         "❌ System Error\n\n"
         "Sorry, there was an error processing your question. Please try again later."

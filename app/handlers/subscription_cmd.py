@@ -5,7 +5,7 @@ User-facing subscription commands (read-only + mock subscribe entry).
 import logging
 
 from aiogram import Router
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.filters import Command
 from aiogram.enums import ChatType
 
@@ -77,14 +77,32 @@ async def handle_subscribe_or_renew(message: Message) -> None:
     try:
         user = get_user(db, user_id)
         if not user or user.status != "APPROVED":
-            await message.answer(t_user(user, "sub.cmd_not_approved"))
+            from services.onboarding_messages import state_aware_command_denial
+
+            text, kb = state_aware_command_denial(user)
+            await message.answer(text, reply_markup=kb)
+            logger.info(
+                "subscribe_cmd denied user_id=%s status=%s",
+                user_id, user.status if user else "—",
+            )
             return
 
         # Legal-acceptance gate (defense-in-depth). Required for paid customers.
         from services.legal_documents import has_accepted_all
 
         if not has_accepted_all(user):
-            await message.answer(t_user(user, "legal.gate_message"))
+            resume_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=t_user(user, "btn.resume_legal"),
+                        callback_data="legal_resume",
+                    )
+                ],
+            ])
+            await message.answer(
+                t_user(user, "legal.gate_message"),
+                reply_markup=resume_kb,
+            )
             logger.info("subscribe_cmd legal_consent_missing user_id=%s", user_id)
             return
 
@@ -158,7 +176,14 @@ async def handle_manage_subscription(message: Message) -> None:
     try:
         user = get_user(db, user_id)
         if not user or user.status != "APPROVED":
-            await message.answer(t_user(user, "sub.cmd_not_approved"))
+            from services.onboarding_messages import state_aware_command_denial
+
+            text, kb = state_aware_command_denial(user)
+            await message.answer(text, reply_markup=kb)
+            logger.info(
+                "manage_subscription denied user_id=%s status=%s",
+                user_id, user.status if user else "—",
+            )
             return
 
         sub = getattr(user, "subscription", None)

@@ -235,6 +235,30 @@ async def handle_verify_callback(callback: CallbackQuery) -> None:
         db.close()
 
 
+@router.callback_query(F.data == "legal_resume")
+async def handle_legal_resume(callback: CallbackQuery) -> None:
+    """Re-enter the legal-acceptance flow regardless of user.status.
+
+    Triggered by buttons attached to state-aware deny replies (questions.py,
+    access.py, subscription_cmd.py) so users who have a document missing —
+    either mid-onboarding or after a version bump — can resume without being
+    told to type /start.
+    """
+    user_id = callback.from_user.id
+    db = SessionLocal()
+    try:
+        user = get_user(db, user_id)
+        if not user:
+            await callback.answer()
+            return
+        text, kb = _legal_screen(user)
+        await callback.message.answer(text, reply_markup=kb)
+        await callback.answer()
+        logger.info("Legal acceptance flow resumed user_id=%s status=%s", user_id, user.status)
+    finally:
+        db.close()
+
+
 @router.callback_query(F.data.startswith("legal_view:"))
 async def handle_legal_view(callback: CallbackQuery) -> None:
     """Show a single document's text with a Back button."""

@@ -5,8 +5,9 @@ Handles question limits, validation, and admin notifications.
 
 import logging
 from datetime import datetime, date
+from typing import Optional
 from aiogram import Router, F, Bot
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramForbiddenError
 
@@ -32,10 +33,81 @@ _bot_instance = None
 policy = EntitlementPolicy()
 
 
-def _entitlement_denial_user_message(expl: EntitlementExplanation, user) -> str:
+def _entitlement_denial_user_message(
+    expl: EntitlementExplanation, user
+) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+    """Map a denial into a context-aware (text, keyboard) pair.
+
+    Replaces the previous one-size-fits-all "send /start" reply with guidance
+    that reflects where the user actually is in onboarding / billing.
+    """
+    # No DB row at all → the one place where "send /start" is correct.
+    if user is None:
+        return t(None, "q.deny_not_registered"), None
+
+    # Legal acceptance gate: distinguish "never accepted" (initial onboarding)
+    # from "accepted prior version, document was bumped".
+    if expl.reason == "legal_consent_missing":
+        from services.legal_documents import REQUIRED_DOCUMENTS
+
+        any_accepted = any(
+            getattr(user, d.accepted_at_attr, None) for d in REQUIRED_DOCUMENTS
+        )
+        key = "q.deny_legal_updated" if any_accepted else "q.deny_legal_pending"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=t_user(user, "btn.resume_legal"),
+                    callback_data="legal_resume",
+                )
+            ],
+        ])
+        return t_user(user, key), kb
+
+    # Not approved yet — branch on exact lifecycle status.
     if expl.reason == "user_not_approved":
-        return t_user(user, "q.access_required_status", status=user.status if user else "?")
-    return t_user(user, "q.subscription_inactive")
+        status = user.status
+        if status == "NEW":
+            return t_user(user, "q.deny_new_user"), None
+        if status == "VERIFIED":
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=t_user(user, "btn.request_access_now"),
+                        callback_data="request_access",
+                    )
+                ],
+            ])
+            return t_user(user, "q.deny_must_request_access"), kb
+        if status == "PENDING_APPROVAL":
+            return t_user(user, "q.deny_pending_approval"), None
+        if status == "REJECTED":
+            return t_user(user, "q.deny_rejected"), None
+        return t_user(user, "q.deny_unknown_status", status=status or "?"), None
+
+    # APPROVED, no Subscription row.
+    if expl.reason == "no_subscription":
+        return t_user(user, "q.deny_no_subscription"), None
+
+    # APPROVED, has a Subscription row but it doesn't pass entitlement.
+    if expl.reason in {"grace_expired", "past_due_grace_expired"}:
+        return t_user(user, "q.deny_grace_expired"), None
+    if expl.reason == "subscription_expired":
+        return t_user(user, "q.deny_subscription_expired"), None
+    if expl.reason == "subscription_cancelled":
+        return t_user(user, "q.deny_subscription_cancelled"), None
+    if expl.reason in {
+        "subscription_inactive",
+        "subscription_pending_payment",
+        "subscription_suspended",
+        "subscription_period_expired",
+        "active_missing_end_date",
+        "subscription_state_unknown",
+    }:
+        return t_user(user, "q.deny_subscription_inactive"), None
+
+    # Safety net — should not be reached under current policy.
+    return t_user(user, "q.deny_subscription_inactive"), None
 
 
 MAX_QUESTION_LENGTH = 200
@@ -92,7 +164,7 @@ async def process_private_question_submission(
     try:
         user = get_user(db, user_id)
         if not user:
-            await message.answer(t(None, "q.access_required_simple"))
+            await message.answer(t(None, "q.deny_not_registered"))
             logger.info(f"Unregistered user {user_id} tried to send question")
             return
 
@@ -101,7 +173,8 @@ async def process_private_question_submission(
 
         if not expl.allows_questions:
             ReconciliationService(db).log_user_entitlement_state(user_id)
-            await message.answer(_entitlement_denial_user_message(expl, user))
+            deny_text, deny_kb = _entitlement_denial_user_message(expl, user)
+            await message.answer(deny_text, reply_markup=deny_kb)
             logger.info(
                 "Question blocked by entitlement user_id=%s user_status=%s reason=%s",
                 user_id,

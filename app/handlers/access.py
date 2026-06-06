@@ -52,8 +52,20 @@ async def handle_request_access_callback(callback: CallbackQuery) -> None:
 
         if not has_accepted_all(user):
             await callback.answer(
-                t_user(user, "legal.gate_message"),
+                t_user(user, "legal.gate_message_alert"),
                 show_alert=True,
+            )
+            resume_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=t_user(user, "btn.resume_legal"),
+                        callback_data="legal_resume",
+                    )
+                ],
+            ])
+            await callback.message.answer(
+                t_user(user, "legal.gate_message"),
+                reply_markup=resume_kb,
             )
             return
 
