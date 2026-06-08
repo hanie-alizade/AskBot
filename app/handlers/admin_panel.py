@@ -47,13 +47,11 @@ from database.db import SessionLocal
 from database.models import Question, User
 from database.models_subscription import Payment, Subscription
 from services.admin_panel_state import (
-    append_id_digit,
-    backspace_id_buffer,
-    clear_id_search_buffer,
+    clear_awaiting_id_search,
     clear_pending_answer,
-    get_id_search_buffer,
     get_pending_answer,
-    set_id_search_buffer,
+    is_awaiting_id_search,
+    set_awaiting_id_search,
     set_pending_answer,
 )
 from services.entitlement_policy import EntitlementPolicy
@@ -135,7 +133,7 @@ def _kb_main() -> InlineKeyboardMarkup:
 def _kb_users_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔢 Find by Telegram ID", callback_data="adm:ids")],
+            [InlineKeyboardButton(text="🔍 Search by Telegram ID", callback_data="adm:ids")],
             [InlineKeyboardButton(text="📋 All users (paged)", callback_data="adm:ul:0")],
             [InlineKeyboardButton(text="⏳ Pending approval", callback_data="adm:up")],
             *_nav("adm:h"),
@@ -168,7 +166,15 @@ def _kb_subscriptions_menu() -> InlineKeyboardMarkup:
 def _system_settings_text() -> str:
     return "\n".join(
         [
-            "<b>System Settings</b> (read-only)\n",
+            "<b>⚙️ System Settings Overview</b>",
+            "",
+            _UI_SEPARATOR,
+            "",
+            "Read-only snapshot of the live configuration values the bot is "
+            "running with. Use Render's dashboard to change them.",
+            "",
+            _UI_SEPARATOR,
+            "",
             f"VIP_GROUP_ID: <code>{config.vip_group_id}</code>",
             f"SUBSCRIPTION_ENFORCEMENT_ENABLED: <b>{config.subscription_enforcement_enabled}</b>",
             f"SUBSCRIPTION_GRANDFATHER_ENABLED: <b>{config.subscription_grandfather_enabled}</b>",
@@ -176,6 +182,7 @@ def _system_settings_text() -> str:
             f"MOCK_SUBSCRIPTION_ACTIVE_BY_DEFAULT: <b>{config.mock_subscription_active_by_default}</b>",
             f"VIP lapse removal delay (s): <code>{config.vip_subscription_lapse_removal_delay_seconds}</code>",
             f"VIP sync interval (s): <code>{config.vip_membership_sync_interval_seconds}</code>",
+            f"Stripe mode: <b>{config.stripe_mode_name}</b> (live={config.stripe_live_mode})",
             f"Stripe key set: <b>{bool(config.stripe_secret_key)}</b>",
             f"Webhook secret set: <b>{bool(config.stripe_webhook_secret)}</b>",
         ]
@@ -197,6 +204,42 @@ def _nav(back_cb: Optional[str]) -> List[List[InlineKeyboardButton]]:
         row.append(InlineKeyboardButton(text="◀ Back", callback_data=back_cb))
     row.append(InlineKeyboardButton(text="🏠 Home", callback_data="adm:h"))
     return [row]
+
+
+# Visual separator and standardized empty-state template used across every
+# admin panel screen so empty/zero-result pages don't collapse into tiny
+# one-line messages.
+_UI_SEPARATOR = "━━━━━━━━━━━━━━━━━━━━"
+
+
+def _empty_state(title: str, body: str, hint: Optional[str] = None) -> str:
+    """Render an empty-result page consistently.
+
+    title : icon + 3+ word heading (e.g. "📋 Pending Approval Queue")
+    body  : the "nothing here" sentence (full sentence, ends with period)
+    hint  : optional second paragraph (e.g. "Approve requests will appear here.")
+    """
+    lines = [f"<b>{title}</b>", "", _UI_SEPARATOR, "", body]
+    if hint:
+        lines.extend(["", hint])
+    lines.extend(["", _UI_SEPARATOR])
+    return "\n".join(lines)
+
+
+def _section_header(title: str, description: str, prompt: str = "Choose an option below.") -> str:
+    """Render a section / sub-menu screen consistently.
+
+    Mirrors `_empty_state` so every full-screen body in the admin panel has
+    the same visual rhythm: icon + 3+ word title, separator, descriptive
+    paragraph, action prompt, separator.
+    """
+    return (
+        f"<b>{title}</b>\n\n"
+        f"{_UI_SEPARATOR}\n\n"
+        f"{description}\n\n"
+        f"{prompt}\n\n"
+        f"{_UI_SEPARATOR}"
+    )
 
 
 async def _safe_edit(
@@ -264,8 +307,13 @@ async def _render_user_detail(callback: CallbackQuery, tid: int, *, back: str) -
     try:
         u = get_user(db, tid)
         if not u:
-            await _safe_edit(callback, f"User <code>{tid}</code> not found.", InlineKeyboardMarkup(inline_keyboard=_nav(back)))
-            await callback.answer()
+            # Popup keeps the admin on the menu/list they came from instead of
+            # navigating them to a one-line "not found" page.
+            await callback.answer(
+                f"User {tid} not found.\n\n"
+                "They may have been removed or never registered.",
+                show_alert=True,
+            )
             return
         sub = getattr(u, "subscription", None)
         svc = SubscriptionService(db)
@@ -291,7 +339,7 @@ async def _render_user_detail(callback: CallbackQuery, tid: int, *, back: str) -
 @router.message(CommandStart(), F.from_user.id == config.admin_id)
 async def admin_start(message: Message) -> None:
     clear_pending_answer(message.from_user.id)
-    clear_id_search_buffer(message.from_user.id)
+    clear_awaiting_id_search(message.from_user.id)
     await message.answer(
         "👑 <b>AskBot — Admin</b>\n\n"
         "You are the administrator — <b>no verification or approval is needed</b>.\n\n"
@@ -302,7 +350,12 @@ async def admin_start(message: Message) -> None:
         parse_mode="HTML",
     )
     await message.answer(
-        "<b>Home</b> — choose a section:",
+        _section_header(
+            "🏠 Admin Home Hub",
+            "Manage users, questions, subscriptions, and system settings "
+            "from one place.",
+            "Choose a section below.",
+        ),
         reply_markup=_kb_main(),
         parse_mode="HTML",
     )
@@ -322,23 +375,35 @@ class AdminSectionReplyFilter(BaseFilter):
 @router.message(AdminSectionReplyFilter())
 async def admin_reply_section(message: Message) -> None:
     clear_pending_answer(message.from_user.id)
-    clear_id_search_buffer(message.from_user.id)
+    clear_awaiting_id_search(message.from_user.id)
     label = message.text or ""
     if label == REPLY_USER_MANAGEMENT:
         await message.answer(
-            "<b>User Management</b>\n\nSelect:",
+            _section_header(
+                "👥 User Management Center",
+                "Find users by Telegram ID, browse all users, "
+                "and act on pending approval requests.",
+            ),
             reply_markup=_kb_users_menu(),
             parse_mode="HTML",
         )
     elif label == REPLY_QUESTIONS:
         await message.answer(
-            "<b>Questions</b>\n\nSelect:",
+            _section_header(
+                "📌 Questions Management Section",
+                "View pending questions awaiting a reply or browse the full "
+                "history of questions submitted by users.",
+            ),
             reply_markup=_kb_questions_menu(),
             parse_mode="HTML",
         )
     elif label == REPLY_SUB_PAY:
         await message.answer(
-            "<b>Subscriptions &amp; Payment</b>\n\nSelect:",
+            _section_header(
+                "📜 Subscriptions &amp; Payment Center",
+                "Browse subscriptions, recent payments, the webhook event log, "
+                "and the latest payment per user.",
+            ),
             reply_markup=_kb_subscriptions_menu(),
             parse_mode="HTML",
         )
@@ -353,10 +418,15 @@ async def admin_reply_section(message: Message) -> None:
 @router.callback_query(F.data == "adm:h", F.from_user.id == config.admin_id)
 async def cb_home(callback: CallbackQuery) -> None:
     clear_pending_answer(callback.from_user.id)
-    clear_id_search_buffer(callback.from_user.id)
+    clear_awaiting_id_search(callback.from_user.id)
     await _safe_edit(
         callback,
-        "<b>Home</b>\n\nChoose a section:",
+        _section_header(
+            "🏠 Admin Home Hub",
+            "Manage users, questions, subscriptions, and system settings "
+            "from one place.",
+            "Choose a section below.",
+        ),
         _kb_main(),
     )
     await callback.answer()
@@ -364,7 +434,15 @@ async def cb_home(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "adm:um", F.from_user.id == config.admin_id)
 async def cb_users_menu(callback: CallbackQuery) -> None:
-    await _safe_edit(callback, "<b>User Management</b>\n\nSelect:", _kb_users_menu())
+    await _safe_edit(
+        callback,
+        _section_header(
+            "👥 User Management Center",
+            "Find users by Telegram ID, browse all users, "
+            "and act on pending approval requests.",
+        ),
+        _kb_users_menu(),
+    )
     await callback.answer()
 
 
@@ -375,7 +453,15 @@ async def cb_users_pending(callback: CallbackQuery) -> None:
         pending = get_pending_users(db)
         if not pending:
             kb = InlineKeyboardMarkup(inline_keyboard=_nav("adm:um"))
-            await _safe_edit(callback, "<b>Pending approval</b>\n\nNo users pending.", kb)
+            await _safe_edit(
+                callback,
+                _empty_state(
+                    "📋 Pending Approval Queue",
+                    "There are currently no users waiting for approval.",
+                    "New access requests will appear here as soon as they come in.",
+                ),
+                kb,
+            )
             await callback.answer()
             return
         rows: List[List[InlineKeyboardButton]] = []
@@ -400,6 +486,18 @@ async def cb_users_list(callback: CallbackQuery) -> None:
     try:
         total = count_users_total(db)
         users = list_users_paginated(db, offset, PAGE)
+        if total == 0:
+            await _safe_edit(
+                callback,
+                _empty_state(
+                    "👥 User Management Overview",
+                    "No users are registered in the system yet.",
+                    "Users will appear here as soon as they begin onboarding.",
+                ),
+                InlineKeyboardMarkup(inline_keyboard=_nav("adm:um")),
+            )
+            await callback.answer()
+            return
         lines = [f"<b>All users</b> ({total}) — page {offset // PAGE + 1}\n"]
         for u in users:
             sub = getattr(u, "subscription", None)
@@ -420,7 +518,7 @@ async def cb_users_list(callback: CallbackQuery) -> None:
         nav_rows.extend(_nav("adm:um"))
         await _safe_edit(
             callback,
-            "\n".join(lines).strip() or "Empty.",
+            "\n".join(lines).strip(),
             InlineKeyboardMarkup(inline_keyboard=user_open_rows + nav_rows),
         )
     finally:
@@ -428,104 +526,122 @@ async def cb_users_list(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+def _id_search_prompt_kb() -> InlineKeyboardMarkup:
+    """Single Cancel button shown while admin is asked for the user id."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Cancel", callback_data="adm:idcancel")],
+        *_nav("adm:um"),
+    ])
+
+
+_ID_PROMPT_TEXT = (
+    "<b>🔍 Search User By Telegram ID</b>\n\n"
+    f"{_UI_SEPARATOR}\n\n"
+    "Please send the Telegram ID of the user.\n\n"
+    "<i>You can type it manually or paste it from the clipboard. "
+    "Telegram IDs are numeric and typically 5 to 15 digits long.</i>\n\n"
+    f"{_UI_SEPARATOR}"
+)
+
+_ID_INVALID_TEXT = (
+    "<b>❌ Invalid Telegram ID</b>\n\n"
+    f"{_UI_SEPARATOR}\n\n"
+    "The value you sent doesn't look like a Telegram user id.\n\n"
+    "Please send a valid numeric Telegram ID — typically 5 to 15 digits.\n\n"
+    f"{_UI_SEPARATOR}"
+)
+
+
+def _looks_like_telegram_id(text: str) -> bool:
+    """Numeric only, between 5 and 15 digits (covers historic and modern ids)."""
+    s = text.strip()
+    if not s.isdigit():
+        return False
+    return 5 <= len(s) <= 15
+
+
 @router.callback_query(F.data == "adm:ids", F.from_user.id == config.admin_id)
 async def cb_id_search_start(callback: CallbackQuery) -> None:
-    clear_id_search_buffer(callback.from_user.id)
-    rows = [
-        [
-            InlineKeyboardButton(text=str(d), callback_data=f"adm:idn:{d}")
-            for d in range(1, 4)
-        ],
-        [
-            InlineKeyboardButton(text=str(d), callback_data=f"adm:idn:{d}")
-            for d in range(4, 7)
-        ],
-        [
-            InlineKeyboardButton(text=str(d), callback_data=f"adm:idn:{d}")
-            for d in range(7, 10)
-        ],
-        [
-            InlineKeyboardButton(text="0", callback_data="adm:idn:0"),
-            InlineKeyboardButton(text="⌫", callback_data="adm:idb"),
-            InlineKeyboardButton(text="CLR", callback_data="adm:idc"),
-        ],
-        [
-            InlineKeyboardButton(text="🔍 Search", callback_data="adm:idgo"),
-        ],
-        *_nav("adm:um"),
-    ]
+    """Open the 'send me the id' prompt and mark the admin as awaiting input."""
+    set_awaiting_id_search(callback.from_user.id)
+    # Make sure no stale compose-answer state hijacks the next message.
+    clear_pending_answer(callback.from_user.id)
+    await _safe_edit(callback, _ID_PROMPT_TEXT, _id_search_prompt_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm:idcancel", F.from_user.id == config.admin_id)
+async def cb_id_search_cancel(callback: CallbackQuery) -> None:
+    clear_awaiting_id_search(callback.from_user.id)
     await _safe_edit(
         callback,
-        "<b>Search by Telegram ID</b>\n\nCurrent: <i>(empty)</i>\nTap digits, then Search.",
-        InlineKeyboardMarkup(inline_keyboard=rows),
+        _section_header(
+            "👥 User Management Center",
+            "Find users by Telegram ID, browse all users, "
+            "and act on pending approval requests.",
+        ),
+        _kb_users_menu(),
     )
-    await callback.answer()
+    await callback.answer("Cancelled")
 
 
-@router.callback_query(F.data.startswith("adm:idn:"), F.from_user.id == config.admin_id)
-async def cb_id_digit(callback: CallbackQuery) -> None:
-    d = callback.data.split(":")[2]
-    buf = append_id_digit(callback.from_user.id, d)
-    await _cb_id_refresh(callback, buf)
-    await callback.answer()
+class AwaitingIdSearchFilter(BaseFilter):
+    """Admin tapped Search by Telegram ID and the next text message is the id."""
+
+    async def __call__(self, message: Message) -> bool:
+        if not message.from_user or message.from_user.id != config.admin_id:
+            return False
+        if not message.text:
+            return False
+        return is_awaiting_id_search(message.from_user.id)
 
 
-@router.callback_query(F.data == "adm:idb", F.from_user.id == config.admin_id)
-async def cb_id_bs(callback: CallbackQuery) -> None:
-    buf = backspace_id_buffer(callback.from_user.id)
-    await _cb_id_refresh(callback, buf)
-    await callback.answer()
-
-
-@router.callback_query(F.data == "adm:idc", F.from_user.id == config.admin_id)
-async def cb_id_clr(callback: CallbackQuery) -> None:
-    set_id_search_buffer(callback.from_user.id, "")
-    await _cb_id_refresh(callback, "")
-    await callback.answer()
-
-
-async def _cb_id_refresh(callback: CallbackQuery, buf: str) -> None:
-    rows = [
-        [
-            InlineKeyboardButton(text=str(d), callback_data=f"adm:idn:{d}")
-            for d in range(1, 4)
-        ],
-        [
-            InlineKeyboardButton(text=str(d), callback_data=f"adm:idn:{d}")
-            for d in range(4, 7)
-        ],
-        [
-            InlineKeyboardButton(text=str(d), callback_data=f"adm:idn:{d}")
-            for d in range(7, 10)
-        ],
-        [
-            InlineKeyboardButton(text="0", callback_data="adm:idn:0"),
-            InlineKeyboardButton(text="⌫", callback_data="adm:idb"),
-            InlineKeyboardButton(text="CLR", callback_data="adm:idc"),
-        ],
-        [
-            InlineKeyboardButton(text="🔍 Search", callback_data="adm:idgo"),
-        ],
-        *_nav("adm:um"),
-    ]
-    disp = html.escape(buf) if buf else "<i>(empty)</i>"
-    await _safe_edit(
-        callback,
-        f"<b>Search by Telegram ID</b>\n\nCurrent: <code>{disp}</code>\nTap digits, then Search.",
-        InlineKeyboardMarkup(inline_keyboard=rows),
-    )
-
-
-@router.callback_query(F.data == "adm:idgo", F.from_user.id == config.admin_id)
-async def cb_id_go(callback: CallbackQuery) -> None:
-    buf = get_id_search_buffer(callback.from_user.id).strip()
-    if not buf.isdigit():
-        await callback.answer("Enter digits only", show_alert=True)
+@router.message(AwaitingIdSearchFilter())
+async def admin_consume_id_search(message: Message) -> None:
+    """Admin sent the user id (typed or pasted). Validate, look up, render."""
+    text = message.text or ""
+    if not _looks_like_telegram_id(text):
+        await message.answer(_ID_INVALID_TEXT, reply_markup=_id_search_prompt_kb())
         return
-    tid = int(buf)
-    clear_id_search_buffer(callback.from_user.id)
-    await _render_user_detail(callback, tid, back="adm:um")
-    # _render_user_detail already answers
+
+    tid = int(text.strip())
+    clear_awaiting_id_search(message.from_user.id)
+
+    db = SessionLocal()
+    try:
+        u = get_user(db, tid)
+        if not u:
+            kb = InlineKeyboardMarkup(inline_keyboard=_nav("adm:um"))
+            await message.answer(
+                _empty_state(
+                    "🔍 User Lookup Result",
+                    f"No user is registered with Telegram ID <code>{tid}</code>.",
+                    "Double-check the id and try again, or return to User Management.",
+                ),
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+            return
+        # Re-use the existing detail renderer. It works against a CallbackQuery,
+        # but everything it needs is the message instance + tid; build a shim.
+        sub = getattr(u, "subscription", None)
+        svc = SubscriptionService(db)
+        snap = svc.get_subscription_snapshot(tid, user=u)
+        expl = EntitlementPolicy().explain_question_entitlement(u)
+        vm = build_subscription_view(snap, expl)
+        sub_block = format_admin_subscription_status_message(tid, vm)
+        body = (
+            f"<b>User</b> <code>{tid}</code>\n"
+            f"Name: {html.escape(u.first_name)}\n"
+            f"Username: {('@' + html.escape(u.username)) if u.username else '—'}\n"
+            f"Approval: <b>{html.escape(u.status)}</b>\n"
+            f"Questions used: <b>{u.questions_used}</b> / limit {u.question_limit}\n\n"
+            f"{html.escape(sub_block)}"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=_kb_user_actions(tid, u))
+        await message.answer(body, reply_markup=kb, parse_mode="HTML")
+    finally:
+        db.close()
 
 
 @router.callback_query(F.data.startswith("adm:uv:"), F.from_user.id == config.admin_id)
@@ -561,7 +677,16 @@ async def cb_reject_menu(callback: CallbackQuery) -> None:
         for code, label, _ in _REJECT_REASONS
     ]
     rows.extend(_nav(f"adm:uv:{tid_s}"))
-    await _safe_edit(callback, "<b>Reject</b> — pick a reason:", InlineKeyboardMarkup(inline_keyboard=rows))
+    await _safe_edit(
+        callback,
+        _section_header(
+            "❌ Reject Access Request",
+            "Choose a reason for rejecting this user. They will be notified "
+            "and removed from the VIP group if currently a member.",
+            "Pick a reason below.",
+        ),
+        InlineKeyboardMarkup(inline_keyboard=rows),
+    )
     await callback.answer()
 
 
@@ -693,7 +818,15 @@ async def cb_vip_remove(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "adm:qm", F.from_user.id == config.admin_id)
 async def cb_q_menu(callback: CallbackQuery) -> None:
-    await _safe_edit(callback, "<b>Questions</b>\n\nSelect:", _kb_questions_menu())
+    await _safe_edit(
+        callback,
+        _section_header(
+            "📌 Questions Management Section",
+            "View pending questions awaiting a reply or browse the full "
+            "history of questions submitted by users.",
+        ),
+        _kb_questions_menu(),
+    )
     await callback.answer()
 
 
@@ -723,6 +856,18 @@ async def cb_q_pending(callback: CallbackQuery) -> None:
     db = SessionLocal()
     try:
         rows, total = list_questions_paginated(db, status="PENDING", offset=offset, limit=PAGE)
+        if total == 0:
+            await _safe_edit(
+                callback,
+                _empty_state(
+                    "📌 Pending Questions Queue",
+                    "There are no pending questions right now.",
+                    "Questions awaiting a reply will appear here as soon as users send them.",
+                ),
+                InlineKeyboardMarkup(inline_keyboard=_nav("adm:qm")),
+            )
+            await callback.answer()
+            return
         text = f"<b>Pending questions</b> ({total})\n"
         await _safe_edit(callback, text, _question_list_rows(rows, offset, total, "adm:qp", "adm:qm"))
     finally:
@@ -736,6 +881,18 @@ async def cb_q_hist(callback: CallbackQuery) -> None:
     db = SessionLocal()
     try:
         rows, total = list_questions_paginated(db, status=None, offset=offset, limit=PAGE)
+        if total == 0:
+            await _safe_edit(
+                callback,
+                _empty_state(
+                    "📚 Questions History Overview",
+                    "No questions have been recorded yet.",
+                    "Every user question (Quick or VIP Legal) will be logged here.",
+                ),
+                InlineKeyboardMarkup(inline_keyboard=_nav("adm:qm")),
+            )
+            await callback.answer()
+            return
         text = f"<b>All questions</b> ({total})\n"
         await _safe_edit(callback, text, _question_list_rows(rows, offset, total, "adm:qh", "adm:qm"))
     finally:
@@ -789,10 +946,14 @@ async def cb_q_compose(callback: CallbackQuery) -> None:
     )
     await _safe_edit(
         callback,
-        "<b>Compose reply</b>\n\n"
-        "Send your <b>next text message</b> in this chat (not a command). "
-        "It will be delivered to the user and the question marked answered.\n\n"
-        "<i>This is the only step that uses a normal message, after you pressed the button.</i>",
+        _section_header(
+            "✍️ Compose Reply Mode",
+            "Send your <b>next text message</b> in this chat (not a command). "
+            "It will be delivered to the user and the question marked answered.\n\n"
+            "<i>This is the only step that uses a normal message — after you "
+            "pressed the button.</i>",
+            "Type your reply now, or tap Cancel.",
+        ),
         kb,
     )
     await callback.answer()
@@ -803,7 +964,11 @@ async def cb_q_compose_cancel(callback: CallbackQuery) -> None:
     clear_pending_answer(callback.from_user.id)
     await _safe_edit(
         callback,
-        "Compose cancelled.",
+        _empty_state(
+            "📝 Reply Compose Cancelled",
+            "The pending reply was discarded — nothing was sent.",
+            "Use the Questions menu below to pick another question.",
+        ),
         InlineKeyboardMarkup(inline_keyboard=_nav("adm:qm")),
     )
     await callback.answer()
@@ -856,7 +1021,11 @@ async def admin_compose_answer(message: Message) -> None:
 async def cb_sub_menu(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback,
-        "<b>Subscriptions &amp; Payment</b>\n\nSelect:",
+        _section_header(
+            "📜 Subscriptions &amp; Payment Center",
+            "Browse subscriptions, recent payments, the webhook event log, "
+            "and the latest payment per user.",
+        ),
         _kb_subscriptions_menu(),
     )
     await callback.answer()
@@ -883,6 +1052,18 @@ async def cb_sub_list(callback: CallbackQuery) -> None:
     db = SessionLocal()
     try:
         rows, total = list_subscriptions_paginated(db, offset, PAGE)
+        if total == 0:
+            await _safe_edit(
+                callback,
+                _empty_state(
+                    "📜 Subscription Management Overview",
+                    "No subscriptions were found.",
+                    "Active and past subscriptions will appear here once users subscribe.",
+                ),
+                InlineKeyboardMarkup(inline_keyboard=_nav("adm:sm")),
+            )
+            await callback.answer()
+            return
         lines = [f"<b>Subscriptions</b> ({total})\n"] + [_fmt_sub(s) for s in rows]
         ik: List[List[InlineKeyboardButton]] = []
         nav: List[InlineKeyboardButton] = []
@@ -905,6 +1086,18 @@ async def cb_pay_recent(callback: CallbackQuery) -> None:
     db = SessionLocal()
     try:
         rows, total = list_payments_paginated(db, offset, PAGE)
+        if total == 0:
+            await _safe_edit(
+                callback,
+                _empty_state(
+                    "💵 Recent Payments Overview",
+                    "No payments have been recorded yet.",
+                    "Stripe webhook events will populate this list as soon as users pay.",
+                ),
+                InlineKeyboardMarkup(inline_keyboard=_nav("adm:sm")),
+            )
+            await callback.answer()
+            return
         lines = [f"<b>Recent payments</b> ({total})\n"] + [_fmt_payment(p) for p in rows]
         ik: List[List[InlineKeyboardButton]] = []
         nav: List[InlineKeyboardButton] = []
@@ -927,6 +1120,18 @@ async def cb_webhook_log(callback: CallbackQuery) -> None:
     db = SessionLocal()
     try:
         rows, total = list_webhook_logs_paginated(db, offset, PAGE)
+        if total == 0:
+            await _safe_edit(
+                callback,
+                _empty_state(
+                    "📡 Webhook Event Log",
+                    "No webhook events have been recorded yet.",
+                    "Stripe deliveries and other provider events will appear here.",
+                ),
+                InlineKeyboardMarkup(inline_keyboard=_nav("adm:sm")),
+            )
+            await callback.answer()
+            return
         lines = [f"<b>Webhook / event log</b> ({total})\n"]
         for r in rows:
             ok = "✅" if r.success else "❌"
@@ -957,6 +1162,18 @@ async def cb_pay_per_user(callback: CallbackQuery) -> None:
     try:
         total = count_distinct_payment_users(db)
         rows = list_latest_payment_per_user_page(db, offset, PAGE)
+        if total == 0:
+            await _safe_edit(
+                callback,
+                _empty_state(
+                    "👤 Latest Payment Per User",
+                    "No payments are linked to any user yet.",
+                    "Each user's most-recent payment will be summarized here.",
+                ),
+                InlineKeyboardMarkup(inline_keyboard=_nav("adm:sm")),
+            )
+            await callback.answer()
+            return
         lines = [f"<b>Latest payment per user</b> ({total} users)\n"] + [_fmt_payment(p) for p in rows]
         ik: List[List[InlineKeyboardButton]] = []
         nav: List[InlineKeyboardButton] = []

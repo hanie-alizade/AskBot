@@ -44,15 +44,53 @@ router = Router(name="language")
 # --------------------------------------------------------------------------- #
 
 
-_MENU_KEYS = ("menu.btn_check_status", "menu.btn_subscription", "menu.btn_change_language")
+_MENU_KEYS = (
+    "menu.btn_check_status",
+    "menu.btn_subscription",
+    "menu.btn_my_questions",
+    "menu.btn_benefits",
+    "menu.btn_rules",
+    "menu.btn_rights",
+    "menu.btn_privacy",
+    "menu.btn_terms",
+    "menu.btn_disclaimer",
+    "menu.btn_change_language",
+)
 
 
 def build_reply_menu(lang: Optional[str]) -> ReplyKeyboardMarkup:
-    """3-button persistent reply keyboard, labels in the user's language."""
+    """Persistent reply keyboard grouped by section.
+
+    Existing three buttons (Check status / Subscription / Change language) are
+    preserved exactly — the new rows are appended underneath, grouped by:
+      • Account      — Check status, Subscription
+      • Membership   — Membership benefits
+      • Community    — Rules, Rights & Obligations
+      • Legal        — Privacy Policy, Terms, Disclaimer
+      • Settings     — Change language
+    """
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=t(lang, "menu.btn_check_status"))],
-            [KeyboardButton(text=t(lang, "menu.btn_subscription"))],
+            # Account
+            [
+                KeyboardButton(text=t(lang, "menu.btn_check_status")),
+                KeyboardButton(text=t(lang, "menu.btn_subscription")),
+            ],
+            [KeyboardButton(text=t(lang, "menu.btn_my_questions"))],
+            # Membership
+            [KeyboardButton(text=t(lang, "menu.btn_benefits"))],
+            # Community
+            [
+                KeyboardButton(text=t(lang, "menu.btn_rules")),
+                KeyboardButton(text=t(lang, "menu.btn_rights")),
+            ],
+            # Legal
+            [
+                KeyboardButton(text=t(lang, "menu.btn_privacy")),
+                KeyboardButton(text=t(lang, "menu.btn_terms")),
+            ],
+            [KeyboardButton(text=t(lang, "menu.btn_disclaimer"))],
+            # Settings
             [KeyboardButton(text=t(lang, "menu.btn_change_language"))],
         ],
         resize_keyboard=True,
@@ -70,6 +108,13 @@ def _label_set(key: str) -> frozenset:
 _CHECK_STATUS_LABELS = _label_set("menu.btn_check_status")
 _SUBSCRIPTION_LABELS = _label_set("menu.btn_subscription")
 _CHANGE_LANGUAGE_LABELS = _label_set("menu.btn_change_language")
+_BENEFITS_LABELS = _label_set("menu.btn_benefits")
+_RULES_LABELS = _label_set("menu.btn_rules")
+_RIGHTS_LABELS = _label_set("menu.btn_rights")
+_PRIVACY_LABELS = _label_set("menu.btn_privacy")
+_TERMS_LABELS = _label_set("menu.btn_terms")
+_DISCLAIMER_LABELS = _label_set("menu.btn_disclaimer")
+_MY_QUESTIONS_LABELS = _label_set("menu.btn_my_questions")
 
 
 # --------------------------------------------------------------------------- #
@@ -241,3 +286,66 @@ async def handle_menu_subscription(message: Message) -> None:
 async def handle_menu_change_language(message: Message) -> None:
     """Reply-keyboard tap: behaves like /language."""
     await handle_language_cmd(message)
+
+
+# --------------------------------------------------------------------------- #
+# New menu sections: Membership / Community / Legal.
+# Each tap delegates to the existing /command handler in app.handlers.user_menu
+# so there is exactly one implementation per feature.
+# --------------------------------------------------------------------------- #
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text.in_(_BENEFITS_LABELS))
+async def handle_menu_benefits(message: Message) -> None:
+    """Reply-keyboard tap: behaves like /benefits."""
+    from .user_menu import handle_benefits
+
+    await handle_benefits(message)
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text.in_(_RULES_LABELS))
+async def handle_menu_rules(message: Message) -> None:
+    """Reply-keyboard tap: behaves like /rules."""
+    from .user_menu import handle_rules
+
+    await handle_rules(message)
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text.in_(_RIGHTS_LABELS))
+async def handle_menu_rights(message: Message) -> None:
+    """Reply-keyboard tap: behaves like /rights."""
+    from .user_menu import handle_rights
+
+    await handle_rights(message)
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text.in_(_PRIVACY_LABELS))
+async def handle_menu_privacy(message: Message) -> None:
+    """Reply-keyboard tap: behaves like /privacy."""
+    from .user_menu import handle_privacy
+
+    await handle_privacy(message)
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text.in_(_TERMS_LABELS))
+async def handle_menu_terms(message: Message) -> None:
+    """Reply-keyboard tap: behaves like /terms."""
+    from .user_menu import handle_terms
+
+    await handle_terms(message)
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text.in_(_DISCLAIMER_LABELS))
+async def handle_menu_disclaimer(message: Message) -> None:
+    """Reply-keyboard tap: behaves like /disclaimer."""
+    from .user_menu import handle_disclaimer
+
+    await handle_disclaimer(message)
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.text.in_(_MY_QUESTIONS_LABELS))
+async def handle_menu_my_questions(message: Message) -> None:
+    """Reply-keyboard tap: behaves like /my_questions."""
+    from .user_menu import handle_my_questions
+
+    await handle_my_questions(message)

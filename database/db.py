@@ -36,6 +36,7 @@ def init_db() -> None:
     from .models_subscription import Subscription, Payment
     from .models_webhook import WebhookProcessingLog  # noqa: F401
     from .models_checkout import CheckoutSession  # noqa: F401
+    from .models_question_draft import QuestionSubmissionDraft  # noqa: F401
     from .migration_runner import run_baseline_migrations
     
     try:

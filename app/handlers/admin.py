@@ -289,7 +289,14 @@ async def handle_pending_command(message: Message) -> None:
         pending_users = get_pending_users(db)
         
         if not pending_users:
-            await message.answer("📋 No users are currently pending approval.")
+            await message.answer(
+                "<b>📋 Pending Approval Queue</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "There are currently no users waiting for approval.\n\n"
+                "New access requests will appear here as soon as they come in.\n\n"
+                "━━━━━━━━━━━━━━━━━━━━",
+                parse_mode="HTML",
+            )
             return
         
         pending_text = "📋 Users Pending Approval:\n\n"
@@ -316,7 +323,14 @@ async def handle_users_command(message: Message) -> None:
         all_users = get_all_users(db)
         
         if not all_users:
-            await message.answer("📋 No users found in system.")
+            await message.answer(
+                "<b>👥 User Management Overview</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "No users are registered in the system yet.\n\n"
+                "Users will appear here as soon as they begin onboarding.\n\n"
+                "━━━━━━━━━━━━━━━━━━━━",
+                parse_mode="HTML",
+            )
             return
         
         users_text = "👥 All Users List:\n\n"

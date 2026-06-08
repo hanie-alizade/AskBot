@@ -118,6 +118,15 @@ def run_baseline_migrations(engine: Engine) -> None:
         _ensure_sqlite_column(engine, "payments", "external_event_id", "VARCHAR(255)")
         # Checkout URL persistence (double-payment reuse window).
         _ensure_sqlite_column(engine, "checkout_sessions", "checkout_url", "VARCHAR(2048)")
+        # Question type chosen by user (QUICK | VIP_LEGAL). Historic rows
+        # backfill to VIP_LEGAL so they preserve their original quota behaviour.
+        _ensure_sqlite_column_with_backfill(
+            engine,
+            "questions",
+            "question_type",
+            "VARCHAR(16) DEFAULT 'VIP_LEGAL'",
+            "UPDATE questions SET question_type = 'VIP_LEGAL' WHERE question_type IS NULL",
+        )
 
     _ensure_index(engine, "ix_subscriptions_provider_customer_id", "subscriptions", "provider_customer_id")
     _ensure_index(engine, "ix_subscriptions_plan_code", "subscriptions", "plan_code")

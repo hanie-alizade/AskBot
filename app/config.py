@@ -7,6 +7,8 @@ import os
 from typing import Optional
 from dotenv import load_dotenv
 
+from config.stripe_config import stripe_config
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -34,11 +36,16 @@ class BotConfig:
         self.mock_subscription_active_by_default: bool = self._get_optional_bool_env(
             "MOCK_SUBSCRIPTION_ACTIVE_BY_DEFAULT", True
         )
-        # Single source of truth for Stripe credentials. Env names match
-        # Stripe's own dashboard wording.
-        self.stripe_secret_key: str = self._get_optional_env("STRIPE_SECRET_KEY", "")
-        self.stripe_price_id: str = self._get_optional_env("STRIPE_PRICE_ID", "")
-        self.stripe_webhook_secret: str = self._get_optional_env("STRIPE_WEBHOOK_SECRET", "")
+        # Stripe credentials come from the centralized config.stripe_config layer,
+        # which selects TEST vs LIVE keys based on STRIPE_LIVE_MODE (default LIVE).
+        # Mirrored here so every existing `config.stripe_*` reader transparently
+        # gets the mode-correct value. Do NOT read STRIPE_* env vars directly
+        # elsewhere — this is the single source of truth.
+        self.stripe_live_mode: bool = stripe_config.is_live_mode
+        self.stripe_mode_name: str = stripe_config.mode_name  # "LIVE" | "TEST"
+        self.stripe_secret_key: str = stripe_config.stripe_secret_key
+        self.stripe_price_id: str = stripe_config.stripe_price_id
+        self.stripe_webhook_secret: str = stripe_config.stripe_webhook_secret
         # Where Stripe redirects users after they close the Customer Portal.
         self.stripe_portal_return_url: str = self._get_optional_env(
             "STRIPE_PORTAL_RETURN_URL",

@@ -280,6 +280,48 @@ MESSAGES = {
         "📊 Remaining VIP Legal questions this month: {remaining}/{limit}\n\n"
         "You'll receive a response as soon as possible."
     ),
+    "q.received_quick": (
+        "✅ Quick Question Received\n\n"
+        "Your question has been sent to the admin.\n\n"
+        "🟢 Quick Questions are unlimited and do not consume your monthly VIP Legal quota.\n\n"
+        "You'll receive a response as soon as possible."
+    ),
+    "q.pick_type_prompt": (
+        "❓ <b>What type of question is this?</b>\n\n"
+        "🟢 <b>Quick Question</b> — fast clarifications. Unlimited, no quota.\n"
+        "⚖️ <b>VIP Legal Question</b> — uses 1 of your {limit} monthly slots ({remaining} remaining).\n\n"
+        "<i>Your message:</i>\n{preview}"
+    ),
+    "q.pick_type_quick_btn": "🟢 Quick Question",
+    "q.pick_type_vip_btn": "⚖️ VIP Legal Question",
+    "q.pick_type_cancel_btn": "❌ Cancel",
+    "q.pick_type_cancelled": "❌ Cancelled — your question was not sent.",
+    "q.pick_type_expired": (
+        "⏳ Your question expired before you picked a type.\n\n"
+        "Please send the question again to retry."
+    ),
+    # ===== Admin-driven question-type override notifications =====
+    "q.admin_typed_to_quick": (
+        "🟢 <b>Question Type Updated</b>\n\n"
+        "After review, your question has been classified as a <b>Quick Question</b>.\n\n"
+        "This question does not consume any of your monthly VIP Legal question allowance.\n\n"
+        "Remaining VIP Legal questions this month: {remaining}/{limit}"
+    ),
+    "q.admin_typed_to_vip": (
+        "⚖️ <b>Question Type Updated</b>\n\n"
+        "After review, your question has been classified as a <b>VIP Legal Question</b>.\n\n"
+        "VIP Legal questions count toward your monthly allowance.\n\n"
+        "Remaining VIP Legal questions this month: {remaining}/{limit}\n\n"
+        "Thank you for your understanding."
+    ),
+    "q.admin_typed_to_vip_blocked": (
+        "⚖️ <b>Question Review Result</b>\n\n"
+        "After review, your question has been classified as a <b>VIP Legal Question</b>.\n\n"
+        "Your monthly VIP Legal allowance has already been fully used ({used}/{limit}).\n\n"
+        "Because no remaining VIP Legal questions are available this month, "
+        "this question cannot be processed.\n\n"
+        "Your allowance will reset at the beginning of next month."
+    ),
     "q.error_generic": "❌ Error\n\nThere was an error processing your question. Please try again.",
     "q.error_forwarding": (
         "❌ Error\n\n"
@@ -340,6 +382,13 @@ MESSAGES = {
     "menu.btn_check_status": "📊 Check approval status",
     "menu.btn_subscription": "💳 Subscription",
     "menu.btn_change_language": "🌐 Change language",
+    "menu.btn_benefits": "🎁 Membership benefits",
+    "menu.btn_rules": "📋 Rules",
+    "menu.btn_rights": "⚖️ Rights & Obligations",
+    "menu.btn_privacy": "📄 Privacy Policy",
+    "menu.btn_terms": "📄 Terms",
+    "menu.btn_disclaimer": "📄 Disclaimer",
+    "menu.btn_my_questions": "📚 My Questions",
     "menu.installed": "📋 Use the menu below to navigate.",
 
     # ===== VIP invite (sent from services/vip_invite.py) =====

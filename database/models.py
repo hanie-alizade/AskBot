@@ -116,16 +116,42 @@ class User(Base):
         return self.question_limit  # Default free limit
 
 
+class QuestionType:
+    """Allowed values for Question.question_type.
+
+    Plain string constants (not Enum) so the column stores the value directly
+    and reads back as a string — no SQLAlchemy enum coercion needed.
+    """
+
+    QUICK = "QUICK"
+    VIP_LEGAL = "VIP_LEGAL"
+
+
+class QuestionStatus:
+    """Allowed values for Question.status (string column, no schema change)."""
+
+    PENDING = "PENDING"
+    ANSWERED = "ANSWERED"
+    FAILED_DELIVERY = "FAILED_DELIVERY"
+    # Set when admin reclassifies QUICK→VIP_LEGAL but the user has already used
+    # their monthly quota. The type is updated to VIP_LEGAL, but no slot is
+    # consumed and the admin is told not to answer the question.
+    QUOTA_BLOCKED = "QUOTA_BLOCKED"
+
+
 class Question(Base):
     """Question model for tracking user questions and admin replies."""
-    
+
     __tablename__ = "questions"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, index=True, nullable=False)
     admin_message_id = Column(Integer, nullable=True)  # Message ID sent to admin
     question_text = Column(Text, nullable=False)
     status = Column(String(20), nullable=False, default="PENDING")  # PENDING, ANSWERED, etc.
+    # Question type chosen by the user before submission. Historic rows
+    # without a type are backfilled to VIP_LEGAL by the migration runner.
+    question_type = Column(String(16), nullable=False, default=QuestionType.VIP_LEGAL)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     answered_at = Column(DateTime(timezone=True), nullable=True)
     admin_reply_text = Column(Text, nullable=True)

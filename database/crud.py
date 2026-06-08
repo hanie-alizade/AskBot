@@ -4,7 +4,7 @@ Handles Create, Read, Update, Delete operations for users.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func
 from typing import Optional, List
@@ -182,24 +182,33 @@ def create_question(
     db: Session,
     user_id: int,
     question_text: str,
-    admin_message_id: Optional[int] = None
+    admin_message_id: Optional[int] = None,
+    question_type: str = "VIP_LEGAL",
 ) -> Optional['Question']:
-    """Create a new question in the database (no commit for atomic transactions)."""
-    
+    """Create a new question in the database (no commit for atomic transactions).
+
+    question_type defaults to VIP_LEGAL so any caller that doesn't yet pass
+    the new field preserves the historical (quota-consuming) behaviour.
+    """
+
     try:
         question = Question(
             user_id=user_id,
             question_text=question_text,
             admin_message_id=admin_message_id,
-            status="PENDING"
+            status="PENDING",
+            question_type=question_type,
         )
-        
+
         db.add(question)
         # Don't commit here - let caller handle commit for atomic transaction
         db.flush()  # Get the ID without committing
-        logger.info(f"Created question {question.id} for user {user_id}")
+        logger.info(
+            "Created question %s for user %s type=%s",
+            question.id, user_id, question_type,
+        )
         return question
-        
+
     except Exception as e:
         logger.error(f"Error creating question for user {user_id}: {e}")
         return None
@@ -282,6 +291,35 @@ def get_user_questions(db: Session, user_id: int, limit: int = 10) -> List['Ques
     except Exception as e:
         logger.error(f"Error getting questions for user {user_id}: {e}")
         return []
+
+
+def list_user_questions_paginated(
+    db: Session,
+    user_id: int,
+    offset: int,
+    limit: int = 5,
+) -> tuple[list['Question'], int]:
+    """Return (rows, total) for a user's own questions, newest first."""
+    base = (
+        db.query(Question)
+        .filter(Question.user_id == user_id)
+        .order_by(Question.created_at.desc())
+    )
+    total = int(base.count() or 0)
+    rows = base.offset(offset).limit(limit).all()
+    return rows, total
+
+
+def get_user_question_by_id(
+    db: Session, user_id: int, question_id: int
+) -> Optional['Question']:
+    """Fetch a single question — scoped to the owning user so callers can't
+    look up someone else's question by guessing the id."""
+    return (
+        db.query(Question)
+        .filter(Question.id == question_id, Question.user_id == user_id)
+        .first()
+    )
 
 
 def check_duplicate_question(db: Session, user_id: int, question_text: str, time_window_minutes: int = 30) -> Optional['Question']:
@@ -663,6 +701,120 @@ def mark_checkout_expired(db: Session, *, stripe_session_id: str) -> bool:
         row.status = CheckoutSessionStatus.EXPIRED.value
         db.commit()
     return True
+
+
+# --- Question submission drafts ---
+
+
+def upsert_question_submission_draft(
+    db: Session, *, telegram_id: int, question_text: str
+) -> "QuestionSubmissionDraft":
+    """Save (or replace) the current draft for this user.
+
+    The unique constraint on telegram_id means a user can only have one
+    active draft. Resubmitting a draft resets its 24h TTL.
+    """
+    from database.models_question_draft import QuestionSubmissionDraft
+
+    row = (
+        db.query(QuestionSubmissionDraft)
+        .filter(QuestionSubmissionDraft.telegram_id == telegram_id)
+        .first()
+    )
+    if row:
+        row.question_text = question_text
+        row.created_at = datetime.utcnow()
+    else:
+        row = QuestionSubmissionDraft(
+            telegram_id=telegram_id,
+            question_text=question_text,
+        )
+        db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _draft_is_fresh(
+    row: "QuestionSubmissionDraft", *, ttl_hours: int
+) -> bool:
+    return row.created_at >= datetime.utcnow() - timedelta(hours=ttl_hours)
+
+
+def take_question_submission_draft(
+    db: Session, *, telegram_id: int, ttl_hours: Optional[int] = None
+) -> Optional[str]:
+    """Atomically read-and-delete the user's draft. Returns the text or None.
+
+    None is returned when no draft exists OR the row has aged past TTL —
+    in both cases any stale row is deleted before returning.
+    """
+    from database.models_question_draft import QuestionSubmissionDraft, DRAFT_TTL_HOURS
+
+    effective_ttl = ttl_hours if ttl_hours is not None else DRAFT_TTL_HOURS
+    row = (
+        db.query(QuestionSubmissionDraft)
+        .filter(QuestionSubmissionDraft.telegram_id == telegram_id)
+        .first()
+    )
+    if not row:
+        return None
+    text = row.question_text if _draft_is_fresh(row, ttl_hours=effective_ttl) else None
+    db.delete(row)
+    db.commit()
+    return text
+
+
+def peek_question_submission_draft(
+    db: Session, *, telegram_id: int, ttl_hours: Optional[int] = None
+) -> Optional[str]:
+    """Read the draft text without consuming it. Stale rows are deleted."""
+    from database.models_question_draft import QuestionSubmissionDraft, DRAFT_TTL_HOURS
+
+    effective_ttl = ttl_hours if ttl_hours is not None else DRAFT_TTL_HOURS
+    row = (
+        db.query(QuestionSubmissionDraft)
+        .filter(QuestionSubmissionDraft.telegram_id == telegram_id)
+        .first()
+    )
+    if not row:
+        return None
+    if not _draft_is_fresh(row, ttl_hours=effective_ttl):
+        db.delete(row)
+        db.commit()
+        return None
+    return row.question_text
+
+
+def clear_question_submission_draft(db: Session, *, telegram_id: int) -> bool:
+    from database.models_question_draft import QuestionSubmissionDraft
+
+    deleted = (
+        db.query(QuestionSubmissionDraft)
+        .filter(QuestionSubmissionDraft.telegram_id == telegram_id)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return bool(deleted)
+
+
+def delete_stale_question_submission_drafts(
+    db: Session, *, older_than: Optional[datetime] = None
+) -> int:
+    """Sweep helper for housekeeping. Default cutoff = TTL_HOURS ago."""
+    from database.models_question_draft import QuestionSubmissionDraft, DRAFT_TTL_HOURS
+
+    cutoff = older_than if older_than else (
+        datetime.utcnow() - timedelta(hours=DRAFT_TTL_HOURS)
+    )
+    n = (
+        db.query(QuestionSubmissionDraft)
+        .filter(QuestionSubmissionDraft.created_at < cutoff)
+        .delete(synchronize_session=False)
+    )
+    if n:
+        db.commit()
+    return int(n)
 
 
 def expire_stale_checkout_sessions(
