@@ -145,7 +145,7 @@ def _kb_questions_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📌 Pending", callback_data="adm:qp:0")],
-            [InlineKeyboardButton(text="📚 All questions", callback_data="adm:qh:0")],
+            [InlineKeyboardButton(text="📚 All submitted questions", callback_data="adm:qh:0")],
             *_nav("adm:h"),
         ]
     )
