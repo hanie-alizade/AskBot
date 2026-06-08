@@ -99,6 +99,18 @@ async def send_welcome_for_status(message: Message, user) -> None:
     if not has_accepted_all(user):
         text, kb = _legal_screen(user)
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
+        # Install the persistent reply menu even while the user still has legal
+        # documents to accept. Without this, regular users who go through the
+        # legal-acceptance flow never receive the reply keyboard (this function
+        # returns before the install below), so their menu button "disappears".
+        # Menu actions that require acceptance redirect back to the legal screen,
+        # so surfacing the menu here is safe.
+        from .language import build_reply_menu
+
+        await message.answer(
+            t_user(user, "menu.installed"),
+            reply_markup=build_reply_menu(getattr(user, "language", None)),
+        )
         return
 
     status = user.status
