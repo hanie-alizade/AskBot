@@ -276,12 +276,11 @@ def _kb_user_actions(tid: int, u: User) -> List[List[InlineKeyboardButton]]:
                 InlineKeyboardButton(text="❌ Reject", callback_data=f"adm:rjm:{tid_s}"),
             ]
         )
-    if u.status not in ("NEW",):
-        rows.append(
-            [
-                InlineKeyboardButton(text="🔄 Reset user", callback_data=f"adm:urx:{tid_s}"),
-            ]
-        )
+    rows.append(
+        [
+            InlineKeyboardButton(text="🔄 Reset user", callback_data=f"adm:urx:{tid_s}"),
+        ]
+    )
     rows.append(
         [
             InlineKeyboardButton(text="⏹ Expire subscription", callback_data=f"adm:ue:{tid_s}"),
