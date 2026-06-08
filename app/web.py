@@ -25,6 +25,7 @@ from fastapi.responses import HTMLResponse
 
 from app.config import config
 from database.crud import (
+    append_webhook_processing_log,
     get_checkout_by_stripe_session_id,
     mark_checkout_activated,
     mark_checkout_completed,
@@ -245,6 +246,39 @@ def _build_event(
     )
 
 
+def _record_webhook_log(
+    *,
+    user_id: Optional[int],
+    event_type: Optional[str],
+    success: bool,
+    detail: str,
+    external_event_id: Optional[str],
+) -> None:
+    """Persist one admin-visible WebhookProcessingLog row in its OWN session.
+
+    Deliberately decoupled from the business `db` session used by the handler:
+    append_webhook_processing_log commits, so sharing the session would commit
+    partial subscription state early (or have it rolled back on a later error).
+    A separate short-lived session keeps the audit log independent of — and
+    resilient to — the outcome of the business transaction.
+
+    This is the missing link that made the admin "Webhook Event Log" stay empty:
+    the live /stripe/webhook path never wrote here (only the mock gateway did).
+    """
+    log_db = SessionLocal()
+    try:
+        append_webhook_processing_log(
+            log_db,
+            user_id=user_id,
+            event_type=event_type,
+            success=success,
+            detail=detail,
+            external_event_id=external_event_id,
+        )
+    finally:
+        log_db.close()
+
+
 @app.post("/stripe/webhook")
 async def stripe_webhook(request: Request) -> dict:
     """Verify Stripe signature, route to SubscriptionService, trigger VIP invite."""
@@ -256,15 +290,36 @@ async def stripe_webhook(request: Request) -> dict:
         logger.error(
             "STRIPE WEBHOOK: STRIPE_WEBHOOK_SECRET missing — rejecting all events"
         )
+        _record_webhook_log(
+            user_id=None,
+            event_type=None,
+            success=False,
+            detail="webhook_secret_missing",
+            external_event_id=None,
+        )
         raise HTTPException(status_code=503, detail="Webhook not configured")
 
     try:
         event = stripe.Webhook.construct_event(payload, signature, webhook_secret)
     except stripe.SignatureVerificationError as e:
         logger.warning("STRIPE WEBHOOK: invalid signature: %s", e)
+        _record_webhook_log(
+            user_id=None,
+            event_type=None,
+            success=False,
+            detail="invalid_signature",
+            external_event_id=None,
+        )
         raise HTTPException(status_code=400, detail="Invalid signature")
     except ValueError as e:
         logger.warning("STRIPE WEBHOOK: invalid payload: %s", e)
+        _record_webhook_log(
+            user_id=None,
+            event_type=None,
+            success=False,
+            detail="invalid_payload",
+            external_event_id=None,
+        )
         raise HTTPException(status_code=400, detail="Invalid payload")
 
     event_type = event["type"]
@@ -276,6 +331,13 @@ async def stripe_webhook(request: Request) -> dict:
             "Webhook ignored unhandled event_type=%s event_id=%s",
             event_type,
             event_id,
+        )
+        _record_webhook_log(
+            user_id=None,
+            event_type=event_type,
+            success=False,
+            detail="unhandled_event_type",
+            external_event_id=event_id,
         )
         return {"received": True, "handled": False, "reason": "unhandled_event_type"}
 
@@ -327,6 +389,13 @@ async def stripe_webhook(request: Request) -> dict:
                         telegram_id,
                         event_id,
                     )
+                    _record_webhook_log(
+                        user_id=telegram_id,
+                        event_type=event_type,
+                        success=True,
+                        detail="duplicate_session_already_activated",
+                        external_event_id=event_id,
+                    )
                     return {
                         "received": True,
                         "handled": True,
@@ -373,6 +442,13 @@ async def stripe_webhook(request: Request) -> dict:
                     event_id,
                     stripe_sub_id,
                 )
+                _record_webhook_log(
+                    user_id=_resolve_telegram_id_by_subscription(db, stripe_sub_id),
+                    event_type=event_type,
+                    success=True,
+                    detail="duplicate_first_invoice",
+                    external_event_id=event_id,
+                )
                 return {
                     "received": True,
                     "handled": True,
@@ -418,6 +494,13 @@ async def stripe_webhook(request: Request) -> dict:
                     stripe_sub_id,
                     event_id,
                 )
+                _record_webhook_log(
+                    user_id=telegram_id,
+                    event_type=event_type,
+                    success=False,
+                    detail=f"sub_status_ignored:{stripe_status}",
+                    external_event_id=event_id,
+                )
                 return {
                     "received": True,
                     "handled": False,
@@ -448,6 +531,13 @@ async def stripe_webhook(request: Request) -> dict:
                 event_type,
             )
             # 200 so Stripe does not retry forever; we already logged the cause.
+            _record_webhook_log(
+                user_id=None,
+                event_type=event_type,
+                success=False,
+                detail="telegram_id_unresolved",
+                external_event_id=event_id,
+            )
             return {
                 "received": True,
                 "handled": False,
@@ -511,6 +601,17 @@ async def stripe_webhook(request: Request) -> dict:
                 event_id,
                 e,
             )
+
+    _record_webhook_log(
+        user_id=telegram_id,
+        event_type=internal_event_type,
+        success=activation_ok,
+        detail=(
+            f"processed status={status} activation_ok={activation_ok} "
+            f"vip_invite={invite_result}"
+        ),
+        external_event_id=event_id,
+    )
 
     return {
         "received": True,
