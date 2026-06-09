@@ -32,6 +32,13 @@ class User(Base):
     # Preferred UI language. NULL = user has not picked yet (first-time picker shown).
     language = Column(String(8), nullable=True)
 
+    # User segmentation (see services/user_segment.py). NULL = not chosen yet
+    # (existing users are grandfathered NULL; new users pick during onboarding).
+    # Allowed: students | work_permits | residency | other.
+    user_type = Column(String(32), nullable=True)
+    # Free text, only meaningful when user_type == "other".
+    user_type_custom = Column(String(255), nullable=True)
+
     # VIP Legal question quota — per-month cap (per client document).
     # last_question_date now tracks the month-of-last-quota-event, not the day.
     question_limit = Column(Integer, default=2)

@@ -1,9 +1,9 @@
 """
 Required legal documents and acceptance helpers.
 
-All text is PLACEHOLDER. Final wording will be provided by the client and
-swapped in via the constants below — when wording changes, bump the version
-string so existing users are re-prompted by `missing_documents`.
+Text is the client-provided final wording for VIP Spain Community. When wording
+changes, bump the version string so existing users are re-prompted by
+`missing_documents` (acceptance is only valid for the current version).
 """
 
 from __future__ import annotations
@@ -17,35 +17,69 @@ from database.models import User
 
 # --- Versions ---------------------------------------------------------------
 
-DISCLAIMER_VERSION = "v1"
-TERMS_VERSION = "v1"
-PRIVACY_VERSION = "v1"
-LIABILITY_VERSION = "v1"
+DISCLAIMER_VERSION = "v2"
+TERMS_VERSION = "v2"
+PRIVACY_VERSION = "v2"
+LIABILITY_VERSION = "v2"
 
 
-# --- Placeholder text (final text to be supplied by client) ----------------
+# --- Client-provided final text ---------------------------------------------
 
 DISCLAIMER_TEXT = (
-    "📄 <b>Disclaimer</b> (version v1)\n\n"
-    "[PLACEHOLDER — final disclaimer text will be supplied by the client.]\n\n"
+    "📄 <b>Disclaimer</b> (version v2)\n\n"
+    "VIP Spain Community provides general educational and informational content "
+    "related to immigration and residency matters in Spain.\n\n"
+    "Information shared within the community does not constitute individualized "
+    "legal advice and does not create an attorney-client relationship. "
+    "Immigration laws and administrative procedures may change, and information "
+    "may become outdated over time.\n\n"
+    "Members should seek professional legal advice before making important legal "
+    "or immigration decisions based on information shared within the community.\n\n"
     "By tapping <b>I Accept</b> you confirm you have read and agree to the disclaimer."
 )
 
 TERMS_TEXT = (
-    "📄 <b>Terms &amp; Conditions</b> (version v1)\n\n"
-    "[PLACEHOLDER — final Terms &amp; Conditions text will be supplied by the client.]\n\n"
+    "📄 <b>Terms &amp; Conditions</b> (version v2)\n\n"
+    "By joining VIP Spain Community, you agree to the following:\n\n"
+    "• Membership is personal and may not be shared, transferred, or resold.\n"
+    "• Members must communicate respectfully and comply with community rules.\n"
+    "• Spam, harassment, unauthorized advertising, and misleading information are prohibited.\n"
+    "• Community content may not be copied, redistributed, or commercially used without permission.\n"
+    "• Access may be suspended or terminated for violations of these rules.\n"
+    "• Subscription fees, renewals, cancellations, and refund eligibility are governed by the terms presented at checkout.\n"
+    "• Continued use of the community constitutes acceptance of any future updates to these terms.\n\n"
     "By tapping <b>I Accept</b> you confirm you have read and agree to the Terms."
 )
 
 PRIVACY_TEXT = (
-    "📄 <b>Privacy Policy</b> (version v1)\n\n"
-    "[PLACEHOLDER — final Privacy Policy text will be supplied by the client.]\n\n"
+    "📄 <b>Privacy Policy</b> (version v2)\n\n"
+    "We collect and process limited personal information necessary to manage your "
+    "membership and provide community services.\n\n"
+    "This may include your Telegram username, account identifiers, membership "
+    "status, and payment-related information processed through secure third-party "
+    "payment providers.\n\n"
+    "Your information is used solely for community management, customer support, "
+    "service delivery, legal compliance, and fraud prevention. We do not sell "
+    "personal data to third parties.\n\n"
+    "Members may request access, correction, or deletion of their personal "
+    "information by contacting the community administrators, subject to applicable "
+    "legal requirements.\n\n"
     "By tapping <b>I Accept</b> you give your consent under GDPR for the data processing described."
 )
 
 LIABILITY_TEXT = (
-    "📄 <b>Liability Limitation</b> (version v1)\n\n"
-    "[PLACEHOLDER — final liability limitation text will be supplied by the client.]\n\n"
+    "📄 <b>Liability Limitation</b> (version v2)\n\n"
+    "VIP Spain Community and its administrators are not responsible for decisions, "
+    "actions, or outcomes resulting from the use of information shared within the "
+    "community.\n\n"
+    "We do not guarantee the accuracy, completeness, or continued availability of "
+    "any information, service, or third-party platform, including Telegram and "
+    "payment providers.\n\n"
+    "To the maximum extent permitted by applicable law, VIP Spain Community shall "
+    "not be liable for any indirect, incidental, special, consequential, or "
+    "punitive damages arising from the use of the community or its services.\n\n"
+    "Any liability, where permitted by law, shall be limited to the amount paid by "
+    "the member for the applicable subscription or service.\n\n"
     "By tapping <b>I Accept</b> you agree to the liability limitations described."
 )
 

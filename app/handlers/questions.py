@@ -23,6 +23,7 @@ from sqlalchemy import update as sa_update
 from ..config import config
 from services.entitlement_policy import EntitlementPolicy, EntitlementExplanation, log_entitlement_decision
 from services.i18n import t, t_user
+from services.user_segment import user_type_admin_label
 from services.question_submission_draft import (
     discard_draft,
     save_draft,
@@ -529,6 +530,7 @@ def _build_admin_question_text(question, user, question_text: str) -> str:
         f"**QUESTION #{question.id}**\n\n"
         f"👤 **From:** {user.first_name} (@{user.username or 'no username'})\n"
         f"🆔 **User ID:** `{user.telegram_id}`\n"
+        f"🗂 **Type:** {user_type_admin_label(user)}\n"
         f"📊 **Status:** {user.status} | "
         f"VIP Legal this month: {user.questions_used}/{user.question_limit}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"

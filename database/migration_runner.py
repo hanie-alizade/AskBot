@@ -105,6 +105,10 @@ def run_baseline_migrations(engine: Engine) -> None:
             "VARCHAR(8)",
             "UPDATE users SET language = 'en' WHERE language IS NULL",
         )
+        # User segmentation (services/user_segment.py). Nullable, no backfill:
+        # existing users stay NULL (grandfathered) and are not forced to pick.
+        _ensure_sqlite_column(engine, "users", "user_type", "VARCHAR(32)")
+        _ensure_sqlite_column(engine, "users", "user_type_custom", "VARCHAR(255)")
         _ensure_sqlite_column(engine, "subscriptions", "provider_customer_id", "VARCHAR(255)")
         _ensure_sqlite_column(engine, "subscriptions", "plan_code", "VARCHAR(50)")
         _ensure_sqlite_column(engine, "subscriptions", "billing_cycle", "VARCHAR(20) DEFAULT 'MONTHLY'")

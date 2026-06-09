@@ -131,10 +131,15 @@ async def handle_subscribe_or_renew(message: Message) -> None:
                 user_id,
                 reusable.stripe_session_id,
             )
+            reuse_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text=t_user(user, "btn.subscribe_now"),
+                    url=reusable.checkout_url,
+                )],
+            ])
             await message.answer(
-                "💳 You already have an active payment session.\n"
-                "Please complete it or wait until it expires.\n\n"
-                f"{reusable.checkout_url}"
+                t_user(user, "sub.checkout_reuse_prompt"),
+                reply_markup=reuse_kb,
             )
             return
 
@@ -154,9 +159,15 @@ async def handle_subscribe_or_renew(message: Message) -> None:
             )
             return
 
+        checkout_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=t_user(user, "btn.subscribe_now"),
+                url=checkout_url,
+            )],
+        ])
         await message.answer(
-            "💳 Tap the link below to start your subscription:\n\n"
-            f"{checkout_url}"
+            t_user(user, "sub.checkout_prompt"),
+            reply_markup=checkout_kb,
         )
         logger.info("subscribe_cmd stripe user_id=%s", user_id)
     finally:

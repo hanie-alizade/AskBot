@@ -189,3 +189,39 @@ async def reconcile_vip_group_membership(bot: Bot, db: Session) -> None:
 def after_subscription_mutation(db: Session, user_id: int) -> None:
     """Public hook: keep VIP lapse markers in sync with subscription rows."""
     sync_vip_markers_after_subscription_change(db, user_id)
+    # Additive side-effect: branded email on notable state changes. Fully
+    # isolated — it never raises and never blocks (dispatch runs in a daemon
+    # thread), so it cannot affect VIP sync or the subscription transaction.
+    try:
+        _notify_email_on_state_change(db, user_id)
+    except Exception as e:  # noqa: BLE001
+        logger.error("email_notify_hook_failed user_id=%s err=%s", user_id, e)
+
+
+def _notify_email_on_state_change(db: Session, user_id: int) -> None:
+    """Read the user's current subscription snapshot and hand it to the email
+    dispatcher. Idempotency lives in the dispatcher, so re-running on unchanged
+    state is safe and silent."""
+    from database.models_subscription import Subscription
+    from services.email.notification_dispatcher import on_subscription_state_changed
+
+    sub = (
+        db.query(Subscription)
+        .filter(Subscription.user_id == user_id)
+        .order_by(Subscription.created_at.desc())
+        .first()
+    )
+    if sub is None:
+        return
+    user = db.query(User).filter(User.telegram_id == user_id).first()
+    context = {
+        "user_id": user_id,
+        "customer_id": sub.provider_customer_id,
+        "end_date": sub.end_date,
+        "grace_until": sub.grace_until,
+        "last_failure_event_id": sub.last_failure_event_id,
+        "failure_reason": sub.last_failure_reason,
+    }
+    # old_state is unknown at this hook (state already committed); idempotency is
+    # keyed on the resulting state + snapshot, so this is not needed for dedup.
+    on_subscription_state_changed(user, None, sub.status, context)

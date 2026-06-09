@@ -15,6 +15,7 @@ No business logic lives here; everything is delegated to:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -111,6 +112,78 @@ async def payment_success() -> str:
 @app.get("/payment-cancel", response_class=HTMLResponse)
 async def payment_cancel() -> str:
     return _CANCEL_HTML
+
+
+# ---------------------------------------------------------------------------
+# Admin/dev-only: simulate a subscription state change → branded email
+# ---------------------------------------------------------------------------
+
+
+@app.post("/admin/test-email-state")
+async def admin_test_email_state(
+    state: str,
+    user_id: int = 0,
+    email: str = "",
+    force_send: bool = False,
+) -> dict:
+    """Manually fire the state-change email path WITHOUT Stripe.
+
+    Disabled unless EMAIL_TEST_ENDPOINT_ENABLED=true (never exposed in prod).
+
+    Query params:
+      state      — ACTIVE | PAST_DUE | CANCELLED | EXPIRED (required)
+      user_id    — optional: pull customer_id/dates from this user's subscription
+      email      — optional: send directly to this address (overrides resolution)
+      force_send — optional: bypass idempotency dedup for repeat testing
+
+    Routes through the SAME dispatcher + idempotency layer used in production, so
+    repeated calls with the same (user_id, state) are deduped unless force_send.
+    """
+    if not config.email_test_endpoint_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    state = (state or "").upper()
+    valid = {"ACTIVE", "PAST_DUE", "CANCELLED", "EXPIRED"}
+    if state not in valid:
+        raise HTTPException(status_code=400, detail=f"state must be one of {sorted(valid)}")
+
+    from datetime import timedelta
+
+    from services.email.notification_dispatcher import dispatch_state_email
+
+    context: dict = {"user_id": user_id}
+    if email:
+        context["email"] = email
+
+    # Pull real customer/date context from the DB when a user_id is supplied.
+    if user_id:
+        db = SessionLocal()
+        try:
+            sub = (
+                db.query(Subscription)
+                .filter(Subscription.user_id == user_id)
+                .order_by(Subscription.created_at.desc())
+                .first()
+            )
+            if sub is not None:
+                context.setdefault("customer_id", sub.provider_customer_id)
+                context["end_date"] = sub.end_date
+                context["grace_until"] = sub.grace_until
+                context["last_failure_event_id"] = sub.last_failure_event_id
+                context["failure_reason"] = sub.last_failure_reason
+        finally:
+            db.close()
+
+    # Provide a sensible synthetic date when none is available, so the email body
+    # has something to show in pure-simulation mode.
+    context.setdefault("end_date", datetime.utcnow() + timedelta(days=30))
+    if force_send:
+        context["force_token"] = str(int(datetime.utcnow().timestamp() * 1000))
+
+    sent = await asyncio.to_thread(
+        dispatch_state_email, (user_id or 0), None, state, context, force=force_send
+    )
+    return {"requested": True, "state": state, "user_id": user_id, "force_send": force_send, "sent": sent}
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +413,11 @@ async def stripe_webhook(request: Request) -> dict:
             external_event_id=event_id,
         )
         return {"received": True, "handled": False, "reason": "unhandled_event_type"}
+
+    # NOTE: branded email notifications are NOT dispatched here. They are driven
+    # by subscription *state changes* via the after_subscription_mutation hook
+    # (services/email/notification_dispatcher.py), giving a single idempotent
+    # email path. Webhook behaviour below is unchanged.
 
     stripe_obj = event["data"]["object"]
     telegram_id: Optional[int] = None

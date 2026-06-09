@@ -351,6 +351,18 @@ MESSAGES = {
     ),
     "sub.cmd_mock_failed": "❌ Mock activation failed. Please try again or contact an admin.",
 
+    # ===== Stripe Checkout prompt (inline button — no raw URL in body) =====
+    "btn.subscribe_now": "💳 Subscribe Now",
+    "sub.checkout_prompt": (
+        "💳 Subscription\n\n"
+        "Click the button below to complete your subscription."
+    ),
+    "sub.checkout_reuse_prompt": (
+        "💳 Subscription\n\n"
+        "You already have an active payment session. "
+        "Tap the button below to complete it."
+    ),
+
     # ===== Subscription readout =====
     "sub.readout_title": "📋 Subscription",
     "sub.readout_account_status": "• Account status: {status}",
@@ -390,6 +402,22 @@ MESSAGES = {
     "menu.btn_disclaimer": "📄 Disclaimer",
     "menu.btn_my_questions": "📚 My Questions",
     "menu.installed": "📋 Use the menu below to navigate.",
+
+    # ===== User segmentation (onboarding category step) =====
+    "category.prompt": (
+        "🗂 <b>Please select your category</b>\n\n"
+        "This helps us tailor support to your situation."
+    ),
+    "category.btn_students": "🎓 Students",
+    "category.btn_work_permits": "💼 Work Permits",
+    "category.btn_residency": "🏠 Residency",
+    "category.btn_other": "✳️ Other",
+    "category.other_prompt": (
+        "✍️ Please type your category in a few words "
+        "(for example: “Family reunification”)."
+    ),
+    "category.saved": "✅ Category saved.",
+    "category.invalid_custom": "Please send your category as a short line of text.",
 
     # ===== VIP invite (sent from services/vip_invite.py) =====
     "vip.invite": (

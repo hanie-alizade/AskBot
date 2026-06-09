@@ -192,6 +192,17 @@ MESSAGES = {
     ),
     "sub.cmd_mock_failed": "❌ 模拟激活失败。请重试或联系管理员。",
 
+    # ===== Stripe Checkout 提示（内联按钮 — 正文不含链接）=====
+    "btn.subscribe_now": "💳 立即订阅",
+    "sub.checkout_prompt": (
+        "💳 订阅\n\n"
+        "请点击下方按钮完成订阅。"
+    ),
+    "sub.checkout_reuse_prompt": (
+        "💳 订阅\n\n"
+        "您已有一个进行中的支付会话。请点击下方按钮完成支付。"
+    ),
+
     # ===== Subscription readout =====
     "sub.readout_title": "📋 订阅",
     "sub.readout_account_status": "• 账户状态：{status}",
@@ -228,6 +239,22 @@ MESSAGES = {
     "menu.btn_subscription": "💳 订阅",
     "menu.btn_change_language": "🌐 切换语言",
     "menu.installed": "📋 请使用下方菜单进行操作。",
+
+    # ===== 用户分类（引导流程中的类别步骤）=====
+    "category.prompt": (
+        "🗂 <b>请选择您的类别</b>\n\n"
+        "这有助于我们根据您的情况提供支持。"
+    ),
+    "category.btn_students": "🎓 学生",
+    "category.btn_work_permits": "💼 工作许可",
+    "category.btn_residency": "🏠 居留",
+    "category.btn_other": "✳️ 其他",
+    "category.other_prompt": (
+        "✍️ 请用简短的几个字输入您的类别"
+        "（例如：“家庭团聚”）。"
+    ),
+    "category.saved": "✅ 类别已保存。",
+    "category.invalid_custom": "请用一行简短文字发送您的类别。",
 
     # ===== VIP invite =====
     "vip.invite": (

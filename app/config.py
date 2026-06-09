@@ -65,6 +65,30 @@ class BotConfig:
             self._get_optional_env("VIP_MEMBERSHIP_SYNC_INTERVAL_SECONDS", "300")
         )
 
+        # --- Branded email notifications (Resend) -------------------------------
+        # Independent of Stripe's own receipts. If RESEND_API_KEY is empty (or the
+        # `resend` package is not installed), the email layer logs and skips —
+        # webhook processing is never affected.
+        self.resend_api_key: str = self._get_optional_env("RESEND_API_KEY", "")
+        # Verified sender. Resend's onboarding@resend.dev works without domain
+        # verification for testing; use a verified domain in production.
+        self.email_from: str = self._get_optional_env(
+            "EMAIL_FROM", "VIP Spain Community <onboarding@resend.dev>"
+        )
+        self.email_notifications_enabled: bool = self._get_optional_bool_env(
+            "EMAIL_NOTIFICATIONS_ENABLED", True
+        )
+        # Guards the /dev/email-test endpoint. Off by default so it is never
+        # exposed in production unless explicitly enabled.
+        self.email_test_endpoint_enabled: bool = self._get_optional_bool_env(
+            "EMAIL_TEST_ENDPOINT_ENABLED", False
+        )
+        # Public brand + bot link used in email bodies / CTAs.
+        self.brand_name: str = self._get_optional_env("BRAND_NAME", "VIP Spain Community")
+        self.telegram_bot_url: str = self._get_optional_env(
+            "TELEGRAM_BOT_URL", "https://t.me/"
+        )
+
     @staticmethod
     def _get_required_env(key: str) -> str:
         """Get required environment variable or raise ValueError."""

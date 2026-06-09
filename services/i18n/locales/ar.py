@@ -195,6 +195,18 @@ MESSAGES = {
         "❌ فشل التفعيل التجريبي. حاول مرة أخرى أو تواصل مع المشرف."
     ),
 
+    # ===== Stripe Checkout prompt (زر مضمّن — بدون رابط في النص) =====
+    "btn.subscribe_now": "💳 اشترك الآن",
+    "sub.checkout_prompt": (
+        "💳 الاشتراك\n\n"
+        "اضغط على الزر أدناه لإتمام اشتراكك."
+    ),
+    "sub.checkout_reuse_prompt": (
+        "💳 الاشتراك\n\n"
+        "لديك بالفعل جلسة دفع نشطة. "
+        "اضغط على الزر أدناه لإتمامها."
+    ),
+
     # ===== Subscription readout =====
     "sub.readout_title": "📋 الاشتراك",
     "sub.readout_account_status": "• حالة الحساب: {status}",
@@ -231,6 +243,22 @@ MESSAGES = {
     "menu.btn_subscription": "💳 الاشتراك",
     "menu.btn_change_language": "🌐 تغيير اللغة",
     "menu.installed": "📋 استخدم القائمة بالأسفل للتنقل.",
+
+    # ===== تصنيف المستخدم (خطوة الفئة في التهيئة) =====
+    "category.prompt": (
+        "🗂 <b>الرجاء اختيار فئتك</b>\n\n"
+        "يساعدنا هذا على تقديم الدعم المناسب لحالتك."
+    ),
+    "category.btn_students": "🎓 طلاب",
+    "category.btn_work_permits": "💼 تصاريح العمل",
+    "category.btn_residency": "🏠 الإقامة",
+    "category.btn_other": "✳️ أخرى",
+    "category.other_prompt": (
+        "✍️ اكتب فئتك بكلمات قليلة "
+        "(مثال: «لمّ شمل العائلة»)."
+    ),
+    "category.saved": "✅ تم حفظ الفئة.",
+    "category.invalid_custom": "أرسل فئتك كسطر نصي قصير.",
 
     # ===== VIP invite =====
     "vip.invite": (

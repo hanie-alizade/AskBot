@@ -15,6 +15,7 @@ from database.db import SessionLocal
 from ..config import config
 from services.entitlement_policy import EntitlementPolicy
 from services.i18n import t_user
+from services.user_segment import user_type_admin_label
 
 logger = logging.getLogger(__name__)
 
@@ -95,10 +96,18 @@ async def handle_request_access_callback(callback: CallbackQuery) -> None:
 async def notify_admin_about_request(user_id: int, user_name: str) -> None:
     """Send notification to admin about new access request with inline buttons. Admin text stays in English."""
     try:
+        # Show the user's segmentation category so the admin has context up front.
+        db = SessionLocal()
+        try:
+            user_type_label = user_type_admin_label(get_user(db, user_id))
+        finally:
+            db.close()
+
         admin_text = (
             f"🔔 New Access Request\n\n"
             f"👤 User: {user_name}\n"
             f"🆔 ID: {user_id}\n"
+            f"🗂 Type: {user_type_label}\n"
             f"📅 Time: Request received\n\n"
             f"Quick actions below:"
         )

@@ -7,10 +7,10 @@ import logging
 from typing import Optional, Tuple
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import BaseFilter, Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from database.crud import create_user, get_user, update_user_status
+from database.crud import create_user, get_user, set_user_type, update_user_status
 from database.db import SessionLocal
 from services.entitlement_policy import EntitlementPolicy
 from services.i18n import t_user
@@ -20,6 +20,17 @@ from services.legal_documents import (
     has_accepted_all,
     is_accepted,
     mark_accepted,
+)
+from services.onboarding_state import (
+    clear_awaiting_custom_category,
+    is_awaiting_custom_category,
+    set_awaiting_custom_category,
+)
+from services.user_segment import (
+    SEGMENT_UNSET,
+    USER_TYPE_VALUES,
+    UserType,
+    get_user_segment,
 )
 
 from ..config import config
@@ -105,6 +116,21 @@ async def send_welcome_for_status(message: Message, user) -> None:
         # returns before the install below), so their menu button "disappears".
         # Menu actions that require acceptance redirect back to the legal screen,
         # so surfacing the menu here is safe.
+        from .language import build_reply_menu
+
+        await message.answer(
+            t_user(user, "menu.installed"),
+            reply_markup=build_reply_menu(getattr(user, "language", None)),
+        )
+        return
+
+    # Category-selection gate: once legal docs are accepted, a VERIFIED user must
+    # pick a segmentation category before continuing. PENDING_APPROVAL/APPROVED
+    # users are grandfathered (NULL category is allowed) for backward compat, so
+    # this never disturbs users who onboarded before the feature existed.
+    if user.status == "VERIFIED" and get_user_segment(user) == SEGMENT_UNSET:
+        text, kb = _category_screen(user)
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
         from .language import build_reply_menu
 
         await message.answer(
@@ -365,6 +391,14 @@ async def handle_legal_finalize(callback: CallbackQuery) -> None:
             user = get_user(db, user_id)
             logger.info("User %s completed verification (post legal acceptance)", user_id)
 
+        # New required onboarding step: pick a segmentation category before the
+        # user can request access. Block here until one is chosen.
+        if get_user_segment(user) == SEGMENT_UNSET:
+            text, kb = _category_screen(user)
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            await callback.answer(t_user(user, "verify.alert_success"))
+            return
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t_user(user, "btn.request_access"), callback_data="request_access")],
         ])
@@ -373,6 +407,95 @@ async def handle_legal_finalize(callback: CallbackQuery) -> None:
             reply_markup=keyboard,
         )
         await callback.answer(t_user(user, "verify.alert_success"))
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------- #
+# User segmentation — required category step (runs right after legal acceptance)
+# --------------------------------------------------------------------------- #
+
+
+def _category_screen(user) -> Tuple[str, InlineKeyboardMarkup]:
+    """The required 'choose your category' screen. One button per enum value."""
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t_user(user, "category.btn_students"), callback_data="cat:set:students")],
+        [InlineKeyboardButton(text=t_user(user, "category.btn_work_permits"), callback_data="cat:set:work_permits")],
+        [InlineKeyboardButton(text=t_user(user, "category.btn_residency"), callback_data="cat:set:residency")],
+        [InlineKeyboardButton(text=t_user(user, "category.btn_other"), callback_data="cat:set:other")],
+    ])
+    return t_user(user, "category.prompt"), kb
+
+
+@router.callback_query(F.data.startswith("cat:set:"))
+async def handle_category_set(callback: CallbackQuery) -> None:
+    """Persist a chosen category. 'Other' switches to free-text capture instead."""
+    user_id = callback.from_user.id
+    value = callback.data.split(":", 2)[2]
+    if value not in USER_TYPE_VALUES:
+        await callback.answer()
+        return
+
+    db = SessionLocal()
+    try:
+        user = get_user(db, user_id)
+        if not user:
+            await callback.answer()
+            return
+
+        if value == UserType.OTHER:
+            # Defer persistence: capture the next text message as the custom label.
+            set_awaiting_custom_category(user_id)
+            await callback.message.edit_text(
+                t_user(user, "category.other_prompt"), parse_mode="HTML"
+            )
+            await callback.answer()
+            return
+
+        set_user_type(db, user_id, value)
+        clear_awaiting_custom_category(user_id)
+        user = get_user(db, user_id)
+        logger.info("user_type_set telegram_id=%s user_type=%s", user_id, value)
+        await callback.answer(t_user(user, "category.saved"))
+        # Continue onboarding (request-access screen for VERIFIED users).
+        await send_welcome_for_status(callback.message, user)
+    finally:
+        db.close()
+
+
+class AwaitingCustomCategoryFilter(BaseFilter):
+    """Matches a plain text message from a user mid-way through the 'Other' step."""
+
+    async def __call__(self, message: Message) -> bool:
+        if message.from_user is None:
+            return False
+        text = message.text or ""
+        # Let commands (e.g. /start) escape so a user is never trapped.
+        if text.startswith("/"):
+            return False
+        return is_awaiting_custom_category(message.from_user.id)
+
+
+@router.message(AwaitingCustomCategoryFilter())
+async def handle_custom_category_text(message: Message) -> None:
+    """Store the typed custom category for a user who picked 'Other'."""
+    user_id = message.from_user.id
+    raw = (message.text or "").strip()
+    db = SessionLocal()
+    try:
+        user = get_user(db, user_id)
+        if not user:
+            clear_awaiting_custom_category(user_id)
+            return
+        if not raw:
+            await message.answer(t_user(user, "category.invalid_custom"))
+            return
+        set_user_type(db, user_id, UserType.OTHER, custom=raw)
+        clear_awaiting_custom_category(user_id)
+        user = get_user(db, user_id)
+        logger.info("user_type_set telegram_id=%s user_type=other custom=%r", user_id, raw[:40])
+        await message.answer(t_user(user, "category.saved"))
+        await send_welcome_for_status(message, user)
     finally:
         db.close()
 

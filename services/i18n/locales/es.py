@@ -195,6 +195,18 @@ MESSAGES = {
         "❌ La activación simulada falló. Inténtalo de nuevo o contacta a un administrador."
     ),
 
+    # ===== Stripe Checkout prompt (botón en línea — sin URL en el cuerpo) =====
+    "btn.subscribe_now": "💳 Suscribirme ahora",
+    "sub.checkout_prompt": (
+        "💳 Suscripción\n\n"
+        "Pulsa el botón de abajo para completar tu suscripción."
+    ),
+    "sub.checkout_reuse_prompt": (
+        "💳 Suscripción\n\n"
+        "Ya tienes una sesión de pago activa. "
+        "Pulsa el botón de abajo para completarla."
+    ),
+
     # ===== Subscription readout =====
     "sub.readout_title": "📋 Suscripción",
     "sub.readout_account_status": "• Estado de la cuenta: {status}",
@@ -231,6 +243,22 @@ MESSAGES = {
     "menu.btn_subscription": "💳 Suscripción",
     "menu.btn_change_language": "🌐 Cambiar idioma",
     "menu.installed": "📋 Usa el menú de abajo para navegar.",
+
+    # ===== Segmentación de usuario (paso de categoría en el onboarding) =====
+    "category.prompt": (
+        "🗂 <b>Selecciona tu categoría</b>\n\n"
+        "Esto nos ayuda a adaptar el soporte a tu situación."
+    ),
+    "category.btn_students": "🎓 Estudiantes",
+    "category.btn_work_permits": "💼 Permisos de trabajo",
+    "category.btn_residency": "🏠 Residencia",
+    "category.btn_other": "✳️ Otro",
+    "category.other_prompt": (
+        "✍️ Escribe tu categoría en pocas palabras "
+        "(por ejemplo: «Reagrupación familiar»)."
+    ),
+    "category.saved": "✅ Categoría guardada.",
+    "category.invalid_custom": "Envía tu categoría como una línea de texto breve.",
 
     # ===== VIP invite =====
     "vip.invite": (

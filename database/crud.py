@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 from .models import User, Question
 from .models_subscription import Payment, Subscription
@@ -575,6 +575,98 @@ def list_users_paginated(db: Session, offset: int, limit: int = 6) -> List[User]
         .limit(limit)
         .all()
     )
+
+
+def count_users_by_sub_status(db: Session, statuses: Tuple[str, ...]) -> int:
+    """Count distinct users whose subscription status is in `statuses`.
+
+    Read-only helper for the admin User Management dashboard. DISTINCT guards
+    against a user accidentally holding more than one subscription row.
+    """
+    from database.models_subscription import Subscription
+
+    return int(
+        db.query(func.count(func.distinct(User.telegram_id)))
+        .join(Subscription, Subscription.user_id == User.telegram_id)
+        .filter(Subscription.status.in_(statuses))
+        .scalar()
+        or 0
+    )
+
+
+def list_users_by_sub_status_paginated(
+    db: Session, statuses: Tuple[str, ...], offset: int, limit: int = 6
+) -> Tuple[List[User], int]:
+    """Return (users, total) for users whose subscription status is in `statuses`."""
+    from database.models_subscription import Subscription
+
+    base = (
+        db.query(User)
+        .join(Subscription, Subscription.user_id == User.telegram_id)
+        .filter(Subscription.status.in_(statuses))
+        .order_by(User.created_at.desc())
+    )
+    total = int(base.count() or 0)
+    rows = base.offset(offset).limit(limit).all()
+    return rows, total
+
+
+def set_user_type(
+    db: Session,
+    telegram_id: int,
+    user_type: str,
+    custom: Optional[str] = None,
+) -> bool:
+    """Persist a user's segmentation category. Returns False if user not found.
+
+    `custom` is stored only when user_type == "other"; for any other value it is
+    cleared so stale custom text can't linger after a category change.
+    """
+    user = db.query(User).filter(User.telegram_id == telegram_id).first()
+    if not user:
+        return False
+    user.user_type = user_type
+    user.user_type_custom = (custom or "").strip()[:255] if user_type == "other" else None
+    db.commit()
+    return True
+
+
+def claim_email_notification(
+    db: Session,
+    *,
+    idempotency_key: str,
+    user_id: Optional[int] = None,
+    new_state: Optional[str] = None,
+    email: Optional[str] = None,
+) -> bool:
+    """Atomically claim an email idempotency key. Returns True if this caller won
+    the claim (should send), False if it was already claimed (must skip).
+
+    The unique constraint on idempotency_key makes this safe across concurrent
+    webhook deliveries and processes — exactly one insert succeeds. Used only by
+    the email notification layer; touches no subscription state.
+    """
+    from sqlalchemy.exc import IntegrityError
+    from database.models_email_idempotency import EmailNotificationLog
+
+    row = EmailNotificationLog(
+        idempotency_key=idempotency_key[:255],
+        user_id=user_id,
+        new_state=new_state,
+        email=email,
+    )
+    db.add(row)
+    try:
+        db.commit()
+        return True
+    except IntegrityError:
+        db.rollback()
+        return False
+    except Exception as e:  # noqa: BLE001 - never let idempotency bookkeeping raise
+        db.rollback()
+        logger.error("claim_email_notification failed key=%s err=%s", idempotency_key, e)
+        # Fail "claimed" (return False = skip) so an error never causes a send storm.
+        return False
 
 
 def list_users_by_username_prefix(

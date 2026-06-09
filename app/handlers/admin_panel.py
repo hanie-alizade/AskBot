@@ -28,10 +28,13 @@ from app.config import config
 from database.crud import (
     answer_question,
     count_distinct_payment_users,
+    count_users_by_sub_status,
     count_users_total,
     get_pending_users,
     get_question_by_id,
     get_user,
+    get_user_count_by_status,
+    list_users_by_sub_status_paginated,
     list_latest_payment_per_user_page,
     list_payments_paginated,
     list_questions_paginated,
@@ -45,7 +48,8 @@ from database.crud import (
 )
 from database.db import SessionLocal
 from database.models import Question, User
-from database.models_subscription import Payment, Subscription
+from database.models_subscription import Payment, Subscription, SubscriptionStatus
+from services.user_segment import user_type_admin_label
 from services.admin_panel_state import (
     clear_awaiting_id_search,
     clear_pending_answer,
@@ -130,15 +134,81 @@ def _kb_main() -> InlineKeyboardMarkup:
     )
 
 
-def _kb_users_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Search by Telegram ID", callback_data="adm:ids")],
-            [InlineKeyboardButton(text="📋 All users (paged)", callback_data="adm:ul:0")],
-            [InlineKeyboardButton(text="⏳ Pending approval", callback_data="adm:up")],
-            *_nav("adm:h"),
-        ]
+# --------------------------------------------------------------------------- #
+# User Management dashboard
+#
+# Subscription-status groupings power both the summary counters and the
+# filtered list shortcuts (callback adm:uf:<filter>:<offset>). Defined once so
+# the counts shown on a card always match the list that card opens.
+# --------------------------------------------------------------------------- #
+_SUB_ACTIVE_STATUSES = (SubscriptionStatus.ACTIVE.value,)
+_SUB_GRACE_STATUSES = (SubscriptionStatus.GRACE.value, SubscriptionStatus.PAST_DUE.value)
+_SUB_EXPIRED_STATUSES = (SubscriptionStatus.EXPIRED.value, SubscriptionStatus.CANCELLED.value)
+
+# filter key -> (screen title, subscription statuses) for the shortcut lists.
+_USER_FILTERS = {
+    "active": ("🟢 Active Members", _SUB_ACTIVE_STATUSES),
+    "expired": ("🔴 Expired Members", _SUB_EXPIRED_STATUSES),
+    "grace": ("⏳ Grace Period Users", _SUB_GRACE_STATUSES),
+}
+
+
+def _users_dashboard_counts(db) -> dict:
+    """Backend counters for the dashboard header + card subtitles."""
+    return {
+        "total": count_users_total(db),
+        "active": count_users_by_sub_status(db, _SUB_ACTIVE_STATUSES),
+        "grace": count_users_by_sub_status(db, _SUB_GRACE_STATUSES),
+        "expired": count_users_by_sub_status(db, _SUB_EXPIRED_STATUSES),
+        "pending": get_user_count_by_status(db).get("pending_approval", 0),
+    }
+
+
+def _users_dashboard_text(c: dict) -> str:
+    """SaaS-style summary header answering: how many active/expired/pending?"""
+    return (
+        "<b>👥 User Management</b>\n\n"
+        f"{_UI_SEPARATOR}\n\n"
+        f"📊 <b>{c['total']}</b> total users\n\n"
+        f"🟢 Active: <b>{c['active']}</b>\xa0\xa0\xa0🔴 Expired: <b>{c['expired']}</b>\n"
+        f"⏳ Grace: <b>{c['grace']}</b>\xa0\xa0\xa0📝 Pending: <b>{c['pending']}</b>\n\n"
+        "Tap a card to drill in, or search for a specific user.\n\n"
+        f"{_UI_SEPARATOR}"
     )
+
+
+def _kb_users_dashboard(c: dict) -> InlineKeyboardMarkup:
+    """Card-grid keyboard. Counts act as each card's subtitle.
+
+    Layout (cards stack to 1-column automatically on narrow phones):
+      [🟢 Active]   [🔴 Expired]      ← primary membership states
+      [⏳ Grace]    [📝 Pending]      ← grace + attention queue
+      [👥 All Users]                  ← neutral baseline
+      [🔍  Search User  🔍]           ← distinct full-width "search bar"
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=f"🟢 Active · {c['active']}", callback_data="adm:uf:active:0"),
+            InlineKeyboardButton(text=f"🔴 Expired · {c['expired']}", callback_data="adm:uf:expired:0"),
+        ],
+        [
+            InlineKeyboardButton(text=f"⏳ Grace · {c['grace']}", callback_data="adm:uf:grace:0"),
+            InlineKeyboardButton(text=f"📝 Pending · {c['pending']}", callback_data="adm:up"),
+        ],
+        [
+            InlineKeyboardButton(text=f"👥 All Users · {c['total']}", callback_data="adm:ul:0"),
+        ],
+        [
+            InlineKeyboardButton(text="🔍  Search User  🔍", callback_data="adm:ids"),
+        ],
+        *_nav("adm:h"),
+    ])
+
+
+def _build_users_dashboard(db) -> tuple:
+    """(text, keyboard) for the User Management home — one source of truth."""
+    counts = _users_dashboard_counts(db)
+    return _users_dashboard_text(counts), _kb_users_dashboard(counts)
 
 
 def _kb_questions_menu() -> InlineKeyboardMarkup:
@@ -325,6 +395,7 @@ async def _render_user_detail(callback: CallbackQuery, tid: int, *, back: str) -
             f"Name: {html.escape(u.first_name)}\n"
             f"Username: {('@' + html.escape(u.username)) if u.username else '—'}\n"
             f"Approval: <b>{html.escape(u.status)}</b>\n"
+            f"User Category: <b>{html.escape(user_type_admin_label(u))}</b>\n"
             f"Questions used: <b>{u.questions_used}</b> / limit {u.question_limit}\n\n"
             f"{html.escape(sub_block)}"
         )
@@ -377,15 +448,12 @@ async def admin_reply_section(message: Message) -> None:
     clear_awaiting_id_search(message.from_user.id)
     label = message.text or ""
     if label == REPLY_USER_MANAGEMENT:
-        await message.answer(
-            _section_header(
-                "👥 User Management Center",
-                "Find users by Telegram ID, browse all users, "
-                "and act on pending approval requests.",
-            ),
-            reply_markup=_kb_users_menu(),
-            parse_mode="HTML",
-        )
+        db = SessionLocal()
+        try:
+            text, kb = _build_users_dashboard(db)
+        finally:
+            db.close()
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
     elif label == REPLY_QUESTIONS:
         await message.answer(
             _section_header(
@@ -433,15 +501,12 @@ async def cb_home(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "adm:um", F.from_user.id == config.admin_id)
 async def cb_users_menu(callback: CallbackQuery) -> None:
-    await _safe_edit(
-        callback,
-        _section_header(
-            "👥 User Management Center",
-            "Find users by Telegram ID, browse all users, "
-            "and act on pending approval requests.",
-        ),
-        _kb_users_menu(),
-    )
+    db = SessionLocal()
+    try:
+        text, kb = _build_users_dashboard(db)
+    finally:
+        db.close()
+    await _safe_edit(callback, text, kb)
     await callback.answer()
 
 
@@ -525,6 +590,70 @@ async def cb_users_list(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("adm:uf:"), F.from_user.id == config.admin_id)
+async def cb_users_filtered(callback: CallbackQuery) -> None:
+    """Paginated list for a dashboard shortcut: adm:uf:<filter>:<offset>.
+
+    Reuses the All-Users rendering style; `filter` selects the subscription
+    status group (active / expired / grace) defined in _USER_FILTERS.
+    """
+    parts = callback.data.split(":")  # ["adm", "uf", <filter>, <offset>]
+    fkey = parts[2] if len(parts) > 2 else ""
+    offset = int(parts[3]) if len(parts) > 3 else 0
+    spec = _USER_FILTERS.get(fkey)
+    if spec is None:
+        await callback.answer()
+        return
+    title, statuses = spec
+
+    db = SessionLocal()
+    try:
+        users, total = list_users_by_sub_status_paginated(db, statuses, offset, PAGE)
+        if total == 0:
+            await _safe_edit(
+                callback,
+                _empty_state(
+                    title,
+                    "No members match this status right now.",
+                    "They will appear here automatically as subscription states change.",
+                ),
+                InlineKeyboardMarkup(inline_keyboard=_nav("adm:um")),
+            )
+            await callback.answer()
+            return
+
+        lines = [f"<b>{title}</b> ({total}) — page {offset // PAGE + 1}\n"]
+        for u in users:
+            sub = getattr(u, "subscription", None)
+            lines.append(_user_summary_line(u, sub))
+            lines.append("")
+
+        open_rows = [
+            [InlineKeyboardButton(text=f"👤 {u.telegram_id}", callback_data=f"adm:uv:{u.telegram_id}")]
+            for u in users
+        ]
+        nav_rows: List[List[InlineKeyboardButton]] = []
+        nr: List[InlineKeyboardButton] = []
+        if offset > 0:
+            nr.append(InlineKeyboardButton(
+                text="⬅️ Prev", callback_data=f"adm:uf:{fkey}:{max(0, offset - PAGE)}"))
+        if offset + PAGE < total:
+            nr.append(InlineKeyboardButton(
+                text="➡️ Next", callback_data=f"adm:uf:{fkey}:{offset + PAGE}"))
+        if nr:
+            nav_rows.append(nr)
+        nav_rows.extend(_nav("adm:um"))
+
+        await _safe_edit(
+            callback,
+            "\n".join(lines).strip(),
+            InlineKeyboardMarkup(inline_keyboard=open_rows + nav_rows),
+        )
+    finally:
+        db.close()
+    await callback.answer()
+
+
 def _id_search_prompt_kb() -> InlineKeyboardMarkup:
     """Single Cancel button shown while admin is asked for the user id."""
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -572,15 +701,12 @@ async def cb_id_search_start(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "adm:idcancel", F.from_user.id == config.admin_id)
 async def cb_id_search_cancel(callback: CallbackQuery) -> None:
     clear_awaiting_id_search(callback.from_user.id)
-    await _safe_edit(
-        callback,
-        _section_header(
-            "👥 User Management Center",
-            "Find users by Telegram ID, browse all users, "
-            "and act on pending approval requests.",
-        ),
-        _kb_users_menu(),
-    )
+    db = SessionLocal()
+    try:
+        text, kb = _build_users_dashboard(db)
+    finally:
+        db.close()
+    await _safe_edit(callback, text, kb)
     await callback.answer("Cancelled")
 
 
@@ -634,6 +760,7 @@ async def admin_consume_id_search(message: Message) -> None:
             f"Name: {html.escape(u.first_name)}\n"
             f"Username: {('@' + html.escape(u.username)) if u.username else '—'}\n"
             f"Approval: <b>{html.escape(u.status)}</b>\n"
+            f"User Category: <b>{html.escape(user_type_admin_label(u))}</b>\n"
             f"Questions used: <b>{u.questions_used}</b> / limit {u.question_limit}\n\n"
             f"{html.escape(sub_block)}"
         )
