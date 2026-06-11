@@ -186,6 +186,33 @@ async def admin_test_email_state(
     return {"requested": True, "state": state, "user_id": user_id, "force_send": force_send, "sent": sent}
 
 
+@app.delete("/admin/email-idempotency")
+async def admin_clear_email_idempotency(user_id: int) -> dict:
+    """Clear a user's email idempotency rows so notifications can re-send.
+
+    Disabled unless EMAIL_TEST_ENDPOINT_ENABLED=true (never exposed in prod).
+    Use during testing to clear keys burned by a prior failed send, so the next
+    state change re-delivers instead of being deduped as "already sent".
+
+    Query params:
+      user_id — telegram id whose email_notification_log rows to delete (required)
+    """
+    if not config.email_test_endpoint_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    from database.crud import clear_email_notifications_for_user
+
+    db = SessionLocal()
+    try:
+        removed = clear_email_notifications_for_user(db, user_id=user_id)
+    finally:
+        db.close()
+    logger.info("admin_clear_email_idempotency user_id=%s removed=%s", user_id, removed)
+    return {"cleared": True, "user_id": user_id, "removed": removed}
+
+
 # ---------------------------------------------------------------------------
 # Stripe webhook
 # ---------------------------------------------------------------------------

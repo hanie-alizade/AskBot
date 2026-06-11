@@ -669,6 +669,51 @@ def claim_email_notification(
         return False
 
 
+def release_email_notification(db: Session, *, idempotency_key: str) -> bool:
+    """Delete a previously-claimed email idempotency row so the send can be
+    retried (used when the actual send fails after the claim succeeded).
+
+    Returns True if a row was removed. Never raises — idempotency bookkeeping
+    must not break the email path.
+    """
+    from database.models_email_idempotency import EmailNotificationLog
+
+    try:
+        deleted = (
+            db.query(EmailNotificationLog)
+            .filter(EmailNotificationLog.idempotency_key == idempotency_key[:255])
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        return bool(deleted)
+    except Exception as e:  # noqa: BLE001 - never let idempotency bookkeeping raise
+        db.rollback()
+        logger.error("release_email_notification failed key=%s err=%s", idempotency_key, e)
+        return False
+
+
+def clear_email_notifications_for_user(db: Session, *, user_id: int) -> int:
+    """Delete all email idempotency rows for a user so notifications can re-send.
+
+    Maintenance helper for clearing keys that were burned by a prior failed send
+    during testing. Returns the number of rows removed. Never raises.
+    """
+    from database.models_email_idempotency import EmailNotificationLog
+
+    try:
+        deleted = (
+            db.query(EmailNotificationLog)
+            .filter(EmailNotificationLog.user_id == user_id)
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        return int(deleted or 0)
+    except Exception as e:  # noqa: BLE001 - never let idempotency bookkeeping raise
+        db.rollback()
+        logger.error("clear_email_notifications_for_user failed user_id=%s err=%s", user_id, e)
+        return 0
+
+
 def list_users_by_username_prefix(
     db: Session, prefix: str, offset: int, limit: int = 6
 ) -> tuple[List[User], int]:

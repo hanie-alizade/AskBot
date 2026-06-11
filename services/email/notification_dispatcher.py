@@ -26,7 +26,7 @@ import logging
 import threading
 from typing import Any, Optional
 
-from database.crud import claim_email_notification
+from database.crud import claim_email_notification, release_email_notification
 from database.db import SessionLocal
 from database.models_subscription import SubscriptionStatus
 from services.email import (
@@ -108,15 +108,35 @@ def dispatch_state_email(
     """
     context = dict(context or {})
     new_state = _norm(new_state)
+    # Reached-the-worker marker so end-to-end delivery can be confirmed in logs
+    # even when this runs in a detached daemon thread.
+    logger.info(
+        "email_dispatch_start user_id=%s old=%s new=%s force=%s thread=%s",
+        user_id, old_state, new_state, force, threading.current_thread().name,
+    )
     db = SessionLocal()
     try:
         if new_state not in _NOTIFIABLE:
+            logger.info(
+                "email_dispatch_not_notifiable user_id=%s new=%s", user_id, new_state
+            )
             return False
 
         customer_id = context.get("customer_id")
         # Resolve recipient: explicit context email (test/override) wins, else
         # via the Stripe Customer id stored on the subscription.
         email = context.get("email") or resolve_customer_email(customer_id)
+
+        # Resolve the recipient BEFORE claiming the idempotency key. A missing
+        # recipient must NOT burn the key: otherwise Stripe's webhook redelivery
+        # (or the next state sync) — by which point the email is resolvable —
+        # would be silently deduped as "already sent" and never deliver.
+        if not email:
+            logger.warning(
+                "email_skipped_no_email user_id=%s new_state=%s customer_id=%s",
+                user_id, new_state, customer_id,
+            )
+            return False
 
         key = f"{user_id}:{new_state}:{_fingerprint(new_state, context)}"
         if force:
@@ -129,20 +149,34 @@ def dispatch_state_email(
             user_id, old_state, new_state, email, key,
         )
 
+        # Claim immediately before sending so the window where the key is held
+        # but no email goes out is as small as possible.
         if not claim_email_notification(
             db, idempotency_key=key, user_id=user_id, new_state=new_state, email=email
         ):
             logger.info("email_idempotent_skip user_id=%s key=%s", user_id, key)
             return False
 
-        if not email:
-            logger.warning("email_skipped_no_email user_id=%s new_state=%s", user_id, new_state)
-            return False
-
         portal_url = build_portal_url(customer_id)
+        logger.info(
+            "email_send_attempt user_id=%s new=%s email=%s", user_id, new_state, email
+        )
         sent = _send_for_state(new_state, email, portal_url, context)
-        logger.info("email_state_change_done user_id=%s new=%s sent=%s", user_id, new_state, sent)
-        return bool(sent)
+        if not sent:
+            # The send failed (e.g. transient Resend/SDK error). Release the claim
+            # so a webhook redelivery can retry instead of being permanently
+            # deduped. Idempotency for *successful* sends is unaffected.
+            release_email_notification(db, idempotency_key=key)
+            logger.error(
+                "email_send_failed_released user_id=%s new=%s key=%s",
+                user_id, new_state, key,
+            )
+            return False
+        logger.info(
+            "email_state_change_done user_id=%s new=%s sent=%s key=%s",
+            user_id, new_state, sent, key,
+        )
+        return True
     except Exception as e:  # noqa: BLE001 - must never raise
         logger.exception("email_dispatch_failed user_id=%s new=%s err=%s", user_id, new_state, e)
         return False
@@ -164,6 +198,13 @@ def on_subscription_state_changed(
     try:
         context = dict(context or {})
         new_s = _norm(new_state)
+        # START marker: confirms the hook reached the email layer for this
+        # transition. Logged before the notifiable filter so even ignored
+        # states (INACTIVE/GRACE/etc.) are visible during debugging.
+        logger.info(
+            "on_subscription_state_changed reached old=%s new=%s notifiable=%s",
+            _norm(old_state), new_s, new_s in _NOTIFIABLE,
+        )
         if new_s not in _NOTIFIABLE:
             return
         user_id = getattr(user, "telegram_id", None) if user is not None else None

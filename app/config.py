@@ -85,9 +85,9 @@ class BotConfig:
         )
         # Public brand + bot link used in email bodies / CTAs.
         self.brand_name: str = self._get_optional_env("BRAND_NAME", "VIP Spain Community")
-        self.telegram_bot_url: str = self._get_optional_env(
-            "TELEGRAM_BOT_URL", "https://t.me/"
-        )
+        # Bot link comes from the env file (TELEGRAM_BOT_URL). Empty fallback so
+        # we never ship a hardcoded URL; the email CTA omits the button if unset.
+        self.telegram_bot_url: str = self._get_optional_env("TELEGRAM_BOT_URL", "")
 
     @staticmethod
     def _get_required_env(key: str) -> str:
