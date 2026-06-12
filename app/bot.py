@@ -81,6 +81,29 @@ async def setup_bot() -> None:
     
     # Import and register handlers here
     from .handlers import start, verify, access, subscription_cmd, admin, group_moderation, questions, admin_panel, language, user_menu
+    from .roles import bind_admin_only, bind_user_only
+
+    # --- Centralized role separation (authorization at the router boundary) ---
+    # Not UI-dependent: these filters gate EVERY handler in the router so an
+    # admin can never fall into a user flow, and a user can never reach the
+    # admin panel — regardless of routing order or a missing per-handler check.
+    #
+    # Admin-only surface (defense-in-depth; handlers also self-check):
+    bind_admin_only(admin_panel.router)
+    # User-only surfaces — onboarding, verification, legal, language picker,
+    # the user menu, and subscription purchase/management. `admin.router`,
+    # `questions.router`, `access.router` and `group_moderation.router` are
+    # intentionally left mixed/shared: they serve both roles via their own
+    # per-handler filters (e.g. admin reply vs user question submission, the
+    # /status & /help info commands, and admin's unauthorized-command replies).
+    for _user_router in (
+        language.router,
+        verify.router,
+        start.router,
+        subscription_cmd.router,
+        user_menu.router,
+    ):
+        bind_user_only(_user_router)
 
     # Register all routers (order matters - first matching handler wins)
     logger.info("Registering routers in order:")

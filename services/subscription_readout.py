@@ -87,10 +87,20 @@ def _next_action_suggestion(vm: SubscriptionViewModel, lang: Optional[str]) -> s
     return t(lang, "sub.next_use_renew")
 
 
-def format_admin_subscription_status_message(user_id: int, vm: SubscriptionViewModel) -> str:
-    """Admin view: stays in English by design."""
-    base = format_user_subscription_message(vm, include_next_action=False, lang=None)
-    return f"🛠 Admin sub view — user {user_id}\n\n{base}"
+def format_admin_subscription_status_message(
+    user_id: int, vm: SubscriptionViewModel, lang: Optional[str] = None
+) -> str:
+    """Admin subscription view. `lang` selects the admin UI language (None = English).
+
+    The body reuses the shared user readout (its labels already have Spanish
+    translations); interpolated values (statuses, dates, mode) are data and are
+    not translated. The header is localized via the admin catalog.
+    """
+    from services.i18n.admin import get_admin_text
+
+    base = format_user_subscription_message(vm, include_next_action=False, lang=lang)
+    header = get_admin_text("sub.admin_header", lang, user_id=user_id)
+    return f"{header}\n\n{base}"
 
 
 def subscribe_placeholder_message(lang: Optional[str] = None) -> str:

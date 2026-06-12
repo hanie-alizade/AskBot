@@ -38,6 +38,7 @@ def init_db() -> None:
     from .models_checkout import CheckoutSession  # noqa: F401
     from .models_question_draft import QuestionSubmissionDraft  # noqa: F401
     from .models_email_idempotency import EmailNotificationLog  # noqa: F401
+    from .models_app_setting import AppSetting  # noqa: F401
     from .migration_runner import run_baseline_migrations
     
     try:

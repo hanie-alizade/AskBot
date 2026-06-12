@@ -611,6 +611,23 @@ def list_users_by_sub_status_paginated(
     return rows, total
 
 
+def list_users_by_sub_status(db: Session, statuses: Tuple[str, ...]) -> List[User]:
+    """Return ALL users whose subscription status is in `statuses` (no paging).
+
+    Read-only helper for the admin export feature; mirrors the filtering used by
+    `list_users_by_sub_status_paginated` so an export matches the dashboard card.
+    """
+    from database.models_subscription import Subscription
+
+    return (
+        db.query(User)
+        .join(Subscription, Subscription.user_id == User.telegram_id)
+        .filter(Subscription.status.in_(statuses))
+        .order_by(User.created_at.desc())
+        .all()
+    )
+
+
 def set_user_type(
     db: Session,
     telegram_id: int,
@@ -735,6 +752,26 @@ def list_questions_paginated(
     return rows, total
 
 
+def count_questions(db: Session, status: Optional[str] = None) -> int:
+    """Count questions, optionally filtered by status. Read-only helper for the
+    Questions Management dashboard counts + export visibility."""
+    base = db.query(func.count(Question.id))
+    if status:
+        base = base.filter(Question.status == status)
+    return int(base.scalar() or 0)
+
+
+def list_questions(db: Session, status: Optional[str] = None) -> List[Question]:
+    """Return ALL questions (optionally filtered by status), newest first.
+
+    Read-only helper for the admin Excel export; mirrors the ordering of
+    `list_questions_paginated` so an export matches the on-screen list."""
+    base = db.query(Question)
+    if status:
+        base = base.filter(Question.status == status)
+    return base.order_by(Question.created_at.desc()).all()
+
+
 def list_subscriptions_paginated(
     db: Session, offset: int, limit: int = 6
 ) -> tuple[List[Subscription], int]:
@@ -771,6 +808,41 @@ def list_latest_payment_per_user_page(
         .order_by(Payment.id.desc())
     )
     return q.offset(offset).limit(limit).all()
+
+
+# --- Generic app settings (key-value) -------------------------------------- #
+
+
+def get_app_setting(db: Session, key: str, default: Optional[str] = None) -> Optional[str]:
+    """Return the stored value for `key`, or `default` if unset. Never raises."""
+    from database.models_app_setting import AppSetting
+
+    try:
+        row = db.query(AppSetting).filter(AppSetting.key == key).first()
+        return row.value if row is not None and row.value is not None else default
+    except Exception as e:  # noqa: BLE001 - settings reads must not break callers
+        logger.error("get_app_setting failed key=%s err=%s", key, e)
+        return default
+
+
+def set_app_setting(db: Session, key: str, value: str) -> bool:
+    """Upsert a setting value. Returns True on success, never raises."""
+    from database.models_app_setting import AppSetting
+
+    try:
+        row = db.query(AppSetting).filter(AppSetting.key == key).first()
+        if row is None:
+            row = AppSetting(key=key, value=value)
+            db.add(row)
+        else:
+            row.value = value
+            row.updated_at = datetime.utcnow()
+        db.commit()
+        return True
+    except Exception as e:  # noqa: BLE001 - settings writes must not break callers
+        db.rollback()
+        logger.error("set_app_setting failed key=%s err=%s", key, e)
+        return False
 
 
 def list_webhook_logs_paginated(
