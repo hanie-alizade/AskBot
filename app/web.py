@@ -580,8 +580,22 @@ async def stripe_webhook(request: Request) -> dict:
             period_start = _ts_to_datetime(stripe_obj.get("current_period_start"))
             period_end = _ts_to_datetime(stripe_obj.get("current_period_end"))
             stripe_status = stripe_obj.get("status")
+            cancel_at_period_end = bool(stripe_obj.get("cancel_at_period_end"))
             # Map Stripe sub status onto our internal event types where useful.
-            if stripe_status == "past_due":
+            #
+            # A Billing-Portal "cancel" schedules cancel_at_period_end=True while
+            # the subscription stays `status=active` until the period closes.
+            # Treat that as a cancellation NOW (CANCELLED state + email), with
+            # access preserved until the period end via the existing
+            # subscription.cancelled handling — so it must be checked BEFORE the
+            # active/trialing renewal arm below, which would otherwise mask it.
+            if cancel_at_period_end and stripe_status in {"active", "trialing"}:
+                internal_event_type = "subscription.cancelled"
+                status = "CANCELLED"
+                # Access cliff: Stripe's cancel_at equals current_period_end for
+                # portal cancels; fall back to current_period_end if absent.
+                period_end = _ts_to_datetime(stripe_obj.get("cancel_at")) or period_end
+            elif stripe_status == "past_due":
                 internal_event_type = "invoice.payment_failed"
                 status = "FAILED"
             elif stripe_status in {"active", "trialing"}:
