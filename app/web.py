@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import stripe
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from app.config import config
@@ -380,8 +380,16 @@ def _record_webhook_log(
 
 
 @app.post("/stripe/webhook")
-async def stripe_webhook(request: Request) -> dict:
-    """Verify Stripe signature, route to SubscriptionService, trigger VIP invite."""
+async def stripe_webhook(request: Request, background_tasks: BackgroundTasks) -> dict:
+    """Verify the Stripe signature, ACK 200 immediately, process in the background.
+
+    Stripe requires a fast 2xx. If the handler does the DB writes, the outbound
+    Stripe API lookup, and the Telegram VIP-invite calls *before* responding, a
+    cold Render instance easily blows past Stripe's timeout. So we do only the
+    cheap, must-be-synchronous signature check here, then hand the verified event
+    to a background task. No processing logic is lost — it lives in
+    `_process_stripe_event`, and its blocking parts run off the event loop.
+    """
     payload = await request.body()
     signature = request.headers.get("stripe-signature", "")
     webhook_secret = config.stripe_webhook_secret
@@ -390,12 +398,10 @@ async def stripe_webhook(request: Request) -> dict:
         logger.error(
             "STRIPE WEBHOOK: STRIPE_WEBHOOK_SECRET missing — rejecting all events"
         )
-        _record_webhook_log(
-            user_id=None,
-            event_type=None,
-            success=False,
-            detail="webhook_secret_missing",
-            external_event_id=None,
+        await asyncio.to_thread(
+            _record_webhook_log,
+            user_id=None, event_type=None, success=False,
+            detail="webhook_secret_missing", external_event_id=None,
         )
         raise HTTPException(status_code=503, detail="Webhook not configured")
 
@@ -403,49 +409,119 @@ async def stripe_webhook(request: Request) -> dict:
         event = stripe.Webhook.construct_event(payload, signature, webhook_secret)
     except stripe.SignatureVerificationError as e:
         logger.warning("STRIPE WEBHOOK: invalid signature: %s", e)
-        _record_webhook_log(
-            user_id=None,
-            event_type=None,
-            success=False,
-            detail="invalid_signature",
-            external_event_id=None,
+        await asyncio.to_thread(
+            _record_webhook_log,
+            user_id=None, event_type=None, success=False,
+            detail="invalid_signature", external_event_id=None,
         )
         raise HTTPException(status_code=400, detail="Invalid signature")
     except ValueError as e:
         logger.warning("STRIPE WEBHOOK: invalid payload: %s", e)
-        _record_webhook_log(
-            user_id=None,
-            event_type=None,
-            success=False,
-            detail="invalid_payload",
-            external_event_id=None,
+        await asyncio.to_thread(
+            _record_webhook_log,
+            user_id=None, event_type=None, success=False,
+            detail="invalid_payload", external_event_id=None,
         )
         raise HTTPException(status_code=400, detail="Invalid payload")
 
+    event_id = event.get("id", "")
+    event_type = event["type"]
+    logger.info("Webhook received event_id=%s event_type=%s", event_id, event_type)
+
+    # ACK Stripe immediately. Everything else (routing, DB, Stripe API lookups,
+    # VIP invite, logging) runs AFTER this response is sent.
+    background_tasks.add_task(_process_stripe_event_safe, event)
+    return {"received": True, "queued": True, "event_type": event_type, "event_id": event_id}
+
+
+async def _process_stripe_event_safe(event: dict) -> None:
+    """Background entrypoint — never raises (the 200 was already sent)."""
+    try:
+        await _process_stripe_event(event)
+    except Exception as e:  # noqa: BLE001
+        logger.exception(
+            "STRIPE WEBHOOK: background processing crashed event_id=%s err=%s",
+            event.get("id", ""), e,
+        )
+
+
+async def _process_stripe_event(event: dict) -> None:
+    """Route + apply a verified Stripe event. Blocking DB/Stripe-SDK work runs in
+    a worker thread; only the async Telegram VIP invite stays on the event loop."""
     event_type = event["type"]
     event_id = event.get("id", "")
-    logger.info("Webhook received event_id=%s event_type=%s", event_id, event_type)
 
     if event_type not in _HANDLED_STRIPE_EVENTS:
         logger.info(
             "Webhook ignored unhandled event_type=%s event_id=%s",
-            event_type,
-            event_id,
+            event_type, event_id,
         )
-        _record_webhook_log(
-            user_id=None,
-            event_type=event_type,
-            success=False,
-            detail="unhandled_event_type",
-            external_event_id=event_id,
+        await asyncio.to_thread(
+            _record_webhook_log,
+            user_id=None, event_type=event_type, success=False,
+            detail="unhandled_event_type", external_event_id=event_id,
         )
-        return {"received": True, "handled": False, "reason": "unhandled_event_type"}
+        return
 
     # NOTE: branded email notifications are NOT dispatched here. They are driven
     # by subscription *state changes* via the after_subscription_mutation hook
     # (services/email/notification_dispatcher.py), giving a single idempotent
-    # email path. Webhook behaviour below is unchanged.
+    # email path.
 
+    result = await asyncio.to_thread(_process_event_db, event)
+    if result.get("done"):
+        return
+
+    telegram_id = result["telegram_id"]
+    activation_ok = result["activation_ok"]
+    internal_event_type = result["internal_event_type"]
+    status = result["status"]
+
+    invite_result: Optional[str] = None
+    if activation_ok and event_type in {
+        "checkout.session.completed",
+        "invoice.paid",
+    }:
+        try:
+            # Lazy import: app.bot owns the live Bot/Dispatcher singletons.
+            from app.bot import bot
+
+            await notify_vip_invite_if_eligible(bot, telegram_id)
+            invite_result = "ok"
+            logger.info(
+                "Webhook VIP invite triggered telegram_id=%s event_id=%s",
+                telegram_id, event_id,
+            )
+        except Exception as e:
+            invite_result = f"error:{e.__class__.__name__}"
+            logger.exception(
+                "Webhook VIP invite failed telegram_id=%s event_id=%s err=%s",
+                telegram_id, event_id, e,
+            )
+
+    await asyncio.to_thread(
+        _record_webhook_log,
+        user_id=telegram_id,
+        event_type=internal_event_type,
+        success=activation_ok,
+        detail=(
+            f"processed status={status} activation_ok={activation_ok} "
+            f"vip_invite={invite_result}"
+        ),
+        external_event_id=event_id,
+    )
+
+
+def _process_event_db(event: dict) -> dict:
+    """Synchronous DB + Stripe-SDK work (runs in a worker thread, never the loop).
+
+    Mirrors the verified Stripe event onto our subscription rows. For early /
+    duplicate cases it writes the webhook log itself and returns {"done": True};
+    otherwise it returns the data the async caller needs for the VIP invite and
+    the final webhook-log row. All branch logic below is unchanged — only moved.
+    """
+    event_type = event["type"]
+    event_id = event.get("id", "")
     stripe_obj = event["data"]["object"]
     telegram_id: Optional[int] = None
     internal_event_type = event_type
@@ -501,12 +577,7 @@ async def stripe_webhook(request: Request) -> dict:
                         detail="duplicate_session_already_activated",
                         external_event_id=event_id,
                     )
-                    return {
-                        "received": True,
-                        "handled": True,
-                        "reason": "duplicate_session_already_activated",
-                        "telegram_id": telegram_id,
-                    }
+                    return {"done": True}
                 mark_checkout_completed(
                     db,
                     stripe_session_id=stripe_session_id,
@@ -554,11 +625,7 @@ async def stripe_webhook(request: Request) -> dict:
                     detail="duplicate_first_invoice",
                     external_event_id=event_id,
                 )
-                return {
-                    "received": True,
-                    "handled": True,
-                    "reason": "duplicate_first_invoice",
-                }
+                return {"done": True}
             telegram_id = _resolve_telegram_id_by_subscription(db, stripe_sub_id)
             period_start, period_end = _invoice_period(stripe_obj)
             status = "PAID"
@@ -620,11 +687,7 @@ async def stripe_webhook(request: Request) -> dict:
                     detail=f"sub_status_ignored:{stripe_status}",
                     external_event_id=event_id,
                 )
-                return {
-                    "received": True,
-                    "handled": False,
-                    "reason": f"sub_status_ignored:{stripe_status}",
-                }
+                return {"done": True}
 
         elif event_type == "customer.subscription.deleted":
             # Stripe subscription id is the object id itself.
@@ -657,11 +720,7 @@ async def stripe_webhook(request: Request) -> dict:
                 detail="telegram_id_unresolved",
                 external_event_id=event_id,
             )
-            return {
-                "received": True,
-                "handled": False,
-                "reason": "telegram_id_unresolved",
-            }
+            return {"done": True}
 
         normalized = _build_event(
             event_id=event_id,
@@ -694,48 +753,10 @@ async def stripe_webhook(request: Request) -> dict:
     finally:
         db.close()
 
-    invite_result: Optional[str] = None
-    if activation_ok and event_type in {
-        "checkout.session.completed",
-        "invoice.paid",
-    }:
-        try:
-            # Lazy import: app.bot owns the live Bot/Dispatcher singletons that
-            # we want to reuse here. Top-level import would couple module load
-            # order to no benefit.
-            from app.bot import bot
-
-            await notify_vip_invite_if_eligible(bot, telegram_id)
-            invite_result = "ok"
-            logger.info(
-                "Webhook VIP invite triggered telegram_id=%s event_id=%s",
-                telegram_id,
-                event_id,
-            )
-        except Exception as e:
-            invite_result = f"error:{e.__class__.__name__}"
-            logger.exception(
-                "Webhook VIP invite failed telegram_id=%s event_id=%s err=%s",
-                telegram_id,
-                event_id,
-                e,
-            )
-
-    _record_webhook_log(
-        user_id=telegram_id,
-        event_type=internal_event_type,
-        success=activation_ok,
-        detail=(
-            f"processed status={status} activation_ok={activation_ok} "
-            f"vip_invite={invite_result}"
-        ),
-        external_event_id=event_id,
-    )
-
     return {
-        "received": True,
-        "handled": activation_ok,
-        "event_type": event_type,
+        "done": False,
         "telegram_id": telegram_id,
-        "vip_invite": invite_result,
+        "activation_ok": activation_ok,
+        "internal_event_type": internal_event_type,
+        "status": status,
     }

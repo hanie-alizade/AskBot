@@ -289,6 +289,22 @@ ADMIN_MESSAGES = {
     # ======================================================================= #
     "cmd.not_authorized": "❌ You are not authorized to use this command.",
 
+    # Command palette ("/" menu) descriptions for the admin.
+    "cmd_desc.start": "Open the admin panel",
+    "cmd_desc.help": "Admin help",
+    "cmd_desc.status": "Admin status",
+    "cmd_desc.language": "Change admin language",
+    "cmd_desc.pending": "Pending approvals",
+    "cmd_desc.users": "List users",
+    "cmd_desc.stats": "User statistics",
+
+    # Admin /status (admin never sees the user verification status flow).
+    "cmd.admin_status_title": "👑 Admin Status",
+    "cmd.admin_status_body": (
+        "You are the administrator — full access, no verification or approval needed.\n"
+        "Use the section buttons below to manage the bot."
+    ),
+
     # /approve
     "cmd.approve_invalid_format": (
         "❌ Invalid format. Use: /approve [user_id]\n\nExample: /approve 123456789"

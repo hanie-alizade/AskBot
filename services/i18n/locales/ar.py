@@ -1,6 +1,14 @@
 """Arabic locale. Telegram clients render Arabic right-to-left automatically."""
 
 MESSAGES = {
+    # ===== Command palette ("/" menu) descriptions =====
+    "cmd_desc.start": "بدء / إعادة تشغيل البوت",
+    "cmd_desc.menu": "فتح القائمة الرئيسية",
+    "cmd_desc.status": "التحقق من حالتك",
+    "cmd_desc.subscription": "الاشتراك والفوترة",
+    "cmd_desc.language": "تغيير اللغة",
+    "cmd_desc.help": "عرض المساعدة",
+
     # ===== Language picker =====
     "lang.picker_first_time": "🌐 مرحبًا! يُرجى اختيار لغتك:",
     "lang.picker_change": "🌐 اختر اللغة:",

@@ -1,6 +1,14 @@
 """Spanish locale."""
 
 MESSAGES = {
+    # ===== Command palette ("/" menu) descriptions =====
+    "cmd_desc.start": "Iniciar / reiniciar el bot",
+    "cmd_desc.menu": "Abrir el menú principal",
+    "cmd_desc.status": "Consultar tu estado",
+    "cmd_desc.subscription": "Suscripción y facturación",
+    "cmd_desc.language": "Cambiar idioma",
+    "cmd_desc.help": "Mostrar ayuda",
+
     # ===== Language picker =====
     "lang.picker_first_time": "🌐 ¡Bienvenido! Por favor, elige tu idioma:",
     "lang.picker_change": "🌐 Selecciona un idioma:",

@@ -147,7 +147,14 @@ async def setup_bot() -> None:
     access.setup_bot_instance(bot)
     group_moderation.setup_bot_instance(bot)
     questions.setup_bot_instance(bot)
-    
+
+    # Register the "/" command palettes (per-language user defaults + admin chat).
+    # Per-chat scopes are refreshed on each language change (see language.py /
+    # admin_panel.py) so the menu updates without a Telegram app restart.
+    from services.bot_commands import setup_default_commands
+
+    await setup_default_commands(bot)
+
     logger.info("Bot setup completed")
 
 

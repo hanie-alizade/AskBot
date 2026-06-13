@@ -1,6 +1,14 @@
 """English locale (source of truth — all keys defined here)."""
 
 MESSAGES = {
+    # ===== Command palette ("/" menu) descriptions =====
+    "cmd_desc.start": "Start / restart the bot",
+    "cmd_desc.menu": "Open the main menu",
+    "cmd_desc.status": "Check your status",
+    "cmd_desc.subscription": "Subscription & billing",
+    "cmd_desc.language": "Change language",
+    "cmd_desc.help": "Show help",
+
     # ===== Language picker =====
     "lang.picker_first_time": "🌐 Welcome! Please choose your language:",
     "lang.picker_change": "🌐 Select a language:",

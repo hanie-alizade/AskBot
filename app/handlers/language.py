@@ -245,6 +245,13 @@ async def handle_language_pick(callback: CallbackQuery) -> None:
                 # Message can't be edited (e.g. too old) — send fresh.
                 await callback.message.answer(confirmation)
 
+        # Refresh this user's "/" command palette in the new language so it
+        # updates immediately (no Telegram app restart needed).
+        if callback.message:
+            from services.bot_commands import set_user_commands_for_chat
+
+            await set_user_commands_for_chat(callback.message.bot, user_id, code)
+
         await callback.answer()
 
         # Continue the user's normal flow in their new language.

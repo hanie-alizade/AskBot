@@ -1579,6 +1579,29 @@ async def cb_system(callback: CallbackQuery) -> None:
 # --- Admin language ---
 
 
+@router.message(Command("help"), F.from_user.id == config.admin_id)
+async def cmd_admin_help(message: Message) -> None:
+    """Admin `/help` shows the admin home hub (admin-localized) — never the user
+    onboarding/verification help. Registered before access.router, so the admin
+    is served here while users still get the user `/help`."""
+    await message.answer(
+        _section_header(_t("home.title"), _t("home.desc"), _t("home.prompt")),
+        reply_markup=_kb_main(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("status"), F.from_user.id == config.admin_id)
+async def cmd_admin_status(message: Message) -> None:
+    """Admin `/status` shows an admin-localized status — never the user
+    'verify your account' flow. Users still get the user `/status`."""
+    await message.answer(
+        f"<b>{_t('cmd.admin_status_title')}</b>\n\n{_t('cmd.admin_status_body')}",
+        reply_markup=_kb_main(),
+        parse_mode="HTML",
+    )
+
+
 @router.message(Command("language"), F.from_user.id == config.admin_id)
 async def cmd_admin_language(message: Message) -> None:
     """Admin `/language` opens the ADMIN language picker — never the user flow.
@@ -1601,7 +1624,14 @@ async def cb_language(callback: CallbackQuery) -> None:
 async def cb_set_language(callback: CallbackQuery) -> None:
     """Persist the chosen admin language and re-render the picker in it."""
     code = callback.data.split(":")[2]
-    set_admin_language(code)
+    lang = set_admin_language(code)
+    # Refresh the admin's "/" command palette in the new admin language so it
+    # updates immediately (no Telegram app restart needed).
+    bot = _bot or (callback.message.bot if callback.message else None)
+    if bot is not None:
+        from services.bot_commands import set_admin_commands_for_chat
+
+        await set_admin_commands_for_chat(bot, callback.from_user.id, lang)
     # Re-render in the newly-selected language so the change is immediately visible.
     await _safe_edit(callback, _language_text(), _kb_language_menu())
     await callback.answer(_t("lang.changed"))

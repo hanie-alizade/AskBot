@@ -1,6 +1,14 @@
 """Simplified Chinese locale."""
 
 MESSAGES = {
+    # ===== Command palette ("/" menu) descriptions =====
+    "cmd_desc.start": "启动 / 重启机器人",
+    "cmd_desc.menu": "打开主菜单",
+    "cmd_desc.status": "查看你的状态",
+    "cmd_desc.subscription": "订阅与账单",
+    "cmd_desc.language": "切换语言",
+    "cmd_desc.help": "显示帮助",
+
     # ===== Language picker =====
     "lang.picker_first_time": "🌐 欢迎！请选择您的语言：",
     "lang.picker_change": "🌐 选择语言：",
