@@ -35,6 +35,7 @@ MESSAGES = {
         "You must accept all four to continue."
     ),
     "legal.finalize_btn": "✅ All accepted — continue",
+    "legal.accept_all_btn": "✅ Accept all documents",
     "legal.back_btn": "↩️ Back to documents",
     "legal.alert_accepted": "Recorded ✅",
     "legal.alert_incomplete": "Please accept all four documents to continue.",

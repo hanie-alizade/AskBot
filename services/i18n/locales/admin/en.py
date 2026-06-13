@@ -283,6 +283,7 @@ ADMIN_MESSAGES = {
     "lang.prompt": "Select a language below.",
     "lang.current": "Current: {label}",
     "lang.changed": "Language updated.",
+    "lang.menu_refreshed": "✅ Menu language updated. The buttons below are now in the new language.",
 
     # ======================================================================= #
     # Legacy command handlers (app/handlers/admin.py)

@@ -1632,6 +1632,19 @@ async def cb_set_language(callback: CallbackQuery) -> None:
         from services.bot_commands import set_admin_commands_for_chat
 
         await set_admin_commands_for_chat(bot, callback.from_user.id, lang)
-    # Re-render in the newly-selected language so the change is immediately visible.
+    # Re-render the picker message in the newly-selected language so the change
+    # is immediately visible on this inline menu.
     await _safe_edit(callback, _language_text(), _kb_language_menu())
+
+    # The persistent reply keyboard (bottom section buttons) can ONLY be changed
+    # by sending a new message with a fresh reply_markup — editing won't touch it,
+    # so without this it would stay in the old language until the admin runs
+    # /start. Re-send it now in the new language (this is NOT the /start flow:
+    # no state is reset, just the keyboard is refreshed).
+    if callback.message is not None:
+        await callback.message.answer(
+            _t("lang.menu_refreshed"),
+            reply_markup=_admin_reply_keyboard(),
+            parse_mode="HTML",
+        )
     await callback.answer(_t("lang.changed"))

@@ -221,7 +221,13 @@ async def handle_start(message: Message) -> None:
 
 
 def _legal_screen(user) -> Tuple[str, InlineKeyboardMarkup]:
-    """Render the legal-acceptance screen reflecting current acceptance state."""
+    """Render the legal-acceptance screen reflecting current acceptance state.
+
+    No "continue" button: once the final document is accepted the flow advances
+    automatically (see handle_legal_accept / handle_legal_accept_all). While any
+    document is still outstanding, an "Accept all" shortcut is offered so the
+    user can accept every document in one tap.
+    """
     rows = []
     for doc in REQUIRED_DOCUMENTS:
         accepted = is_accepted(user, doc)
@@ -237,9 +243,9 @@ def _legal_screen(user) -> Tuple[str, InlineKeyboardMarkup]:
                 ]
             )
 
-    if has_accepted_all(user):
+    if not has_accepted_all(user):
         rows.append(
-            [InlineKeyboardButton(text=t_user(user, "legal.finalize_btn"), callback_data="legal_finalize")]
+            [InlineKeyboardButton(text=t_user(user, "legal.accept_all_btn"), callback_data="legal_accept_all")]
         )
 
     text = t_user(user, "legal.intro")
@@ -361,6 +367,14 @@ async def handle_legal_accept(callback: CallbackQuery) -> None:
                 "LEGAL ACCEPTED telegram_id=%s document=%s version=%s",
                 user_id, doc.key, doc.version,
             )
+
+        # Auto-continue: as soon as the last outstanding document is accepted,
+        # advance the flow instead of showing a separate "continue" button.
+        if has_accepted_all(user):
+            await callback.answer(t_user(user, "legal.alert_accepted"))
+            await _proceed_after_legal(callback, db, user)
+            return
+
         text, kb = _legal_screen(user)
         await callback.message.edit_text(text, reply_markup=kb)
         await callback.answer(t_user(user, "legal.alert_accepted"))
@@ -368,9 +382,81 @@ async def handle_legal_accept(callback: CallbackQuery) -> None:
         db.close()
 
 
+@router.callback_query(F.data == "legal_accept_all")
+async def handle_legal_accept_all(callback: CallbackQuery) -> None:
+    """Accept every outstanding required document in one tap, then continue."""
+    user_id = callback.from_user.id
+    db = SessionLocal()
+    try:
+        user = get_user(db, user_id)
+        if not user:
+            await callback.answer()
+            return
+
+        changed = False
+        for doc in REQUIRED_DOCUMENTS:
+            if not is_accepted(user, doc):
+                mark_accepted(user, doc)
+                changed = True
+                logger.info(
+                    "LEGAL ACCEPTED telegram_id=%s document=%s version=%s (accept-all)",
+                    user_id, doc.key, doc.version,
+                )
+        if changed:
+            db.commit()
+            db.refresh(user)
+
+        await callback.answer(t_user(user, "legal.alert_accepted"))
+        await _proceed_after_legal(callback, db, user)
+    finally:
+        db.close()
+
+
+async def _proceed_after_legal(callback: CallbackQuery, db, user) -> None:
+    """Advance the flow once all required documents are accepted.
+
+    Flips NEW → VERIFIED, then routes to the required category step (or the
+    request-access screen if a category is already set). Shared by the per-doc
+    accept handler, the accept-all shortcut, and the legacy finalize button so
+    there is exactly one continuation path.
+    """
+    user_id = user.telegram_id
+
+    if not has_accepted_all(user):
+        # Defensive: should not happen, callers gate on has_accepted_all.
+        text, kb = _legal_screen(user)
+        await callback.message.edit_text(text, reply_markup=kb)
+        return
+
+    if user.status == "NEW":
+        update_user_status(db, user_id, "VERIFIED")
+        user = get_user(db, user_id)
+        logger.info("User %s completed verification (post legal acceptance)", user_id)
+
+    # New required onboarding step: pick a segmentation category before the
+    # user can request access. Block here until one is chosen.
+    if get_user_segment(user) == SEGMENT_UNSET:
+        text, kb = _category_screen(user)
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        return
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t_user(user, "btn.request_access"), callback_data="request_access")],
+    ])
+    await callback.message.edit_text(
+        t_user(user, "verify.complete"),
+        reply_markup=keyboard,
+    )
+
+
 @router.callback_query(F.data == "legal_finalize")
 async def handle_legal_finalize(callback: CallbackQuery) -> None:
-    """Flip NEW → VERIFIED once every required document is accepted."""
+    """Legacy continuation: flip NEW → VERIFIED once every document is accepted.
+
+    The acceptance screen no longer renders this button (acceptance now
+    auto-continues), but the handler is retained so taps on this button in
+    older, still-visible chat messages keep working.
+    """
     user_id = callback.from_user.id
     db = SessionLocal()
     try:
@@ -386,27 +472,8 @@ async def handle_legal_finalize(callback: CallbackQuery) -> None:
             )
             return
 
-        if user.status == "NEW":
-            update_user_status(db, user_id, "VERIFIED")
-            user = get_user(db, user_id)
-            logger.info("User %s completed verification (post legal acceptance)", user_id)
-
-        # New required onboarding step: pick a segmentation category before the
-        # user can request access. Block here until one is chosen.
-        if get_user_segment(user) == SEGMENT_UNSET:
-            text, kb = _category_screen(user)
-            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            await callback.answer(t_user(user, "verify.alert_success"))
-            return
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=t_user(user, "btn.request_access"), callback_data="request_access")],
-        ])
-        await callback.message.edit_text(
-            t_user(user, "verify.complete"),
-            reply_markup=keyboard,
-        )
         await callback.answer(t_user(user, "verify.alert_success"))
+        await _proceed_after_legal(callback, db, user)
     finally:
         db.close()
 
