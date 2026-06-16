@@ -46,10 +46,25 @@ class BotConfig:
         self.stripe_secret_key: str = stripe_config.stripe_secret_key
         self.stripe_price_id: str = stripe_config.stripe_price_id
         self.stripe_webhook_secret: str = stripe_config.stripe_webhook_secret
+        # Public base URL of this deployment (no trailing slash), used to build
+        # Stripe redirect targets. Production MUST set BASE_URL to the live host
+        # (e.g. https://your-service.onrender.com). The localhost default keeps
+        # local dev working without extra config and never silently points at a
+        # real deployment.
+        self.base_url: str = self._get_optional_env(
+            "BASE_URL", "http://localhost:10000"
+        ).rstrip("/")
+        # Stripe redirect targets. Each may be overridden individually; otherwise
+        # they derive from BASE_URL so a single var configures the whole flow.
+        self.payment_success_url: str = self._get_optional_env(
+            "PAYMENT_SUCCESS_URL", f"{self.base_url}/payment-success"
+        )
+        self.payment_cancel_url: str = self._get_optional_env(
+            "PAYMENT_CANCEL_URL", f"{self.base_url}/payment-cancel"
+        )
         # Where Stripe redirects users after they close the Customer Portal.
         self.stripe_portal_return_url: str = self._get_optional_env(
-            "STRIPE_PORTAL_RETURN_URL",
-            "https://askbot-uu5o.onrender.com/payment-success",
+            "STRIPE_PORTAL_RETURN_URL", f"{self.base_url}/payment-success"
         )
         self.checkout_base_url: str = self._get_optional_env("CHECKOUT_BASE_URL", "https://example.com")
         # VIP: remove from group this many seconds after subscription stops being ACTIVE/valid GRACE (default 2 days).

@@ -53,10 +53,12 @@ def send_email(to: Optional[str], subject: str, html: str) -> bool:
         resend.api_key = config.resend_api_key
         response = resend.Emails.send(
             {
-                # Resend's shared testing sender — works without domain
-                # verification. Overrides config.email_from so an unverified
-                # custom EMAIL_FROM domain can't silently fail the send.
-                "from": "onboarding@resend.dev",
+                # Sender address, configurable via the EMAIL_FROM env var.
+                # Defaults to Resend's shared testing sender
+                # ("...<onboarding@resend.dev>"), which works without domain
+                # verification. Point EMAIL_FROM at a verified domain to send
+                # from your own address.
+                "from": config.email_from,
                 "to": [to],
                 "subject": subject,
                 "html": html,
