@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Column, DateTime, Integer, String
+from sqlalchemy import BigInteger, Column, DateTime, Integer, String
 
 from database.db import Base
 
@@ -37,7 +37,7 @@ class CheckoutSession(Base):
     __tablename__ = "checkout_sessions"
 
     id = Column(Integer, primary_key=True, index=True)
-    telegram_id = Column(Integer, nullable=False, index=True)
+    telegram_id = Column(BigInteger, nullable=False, index=True)
 
     # The Stripe Checkout Session ID (cs_test_… / cs_live_…). Unique constraint
     # is the primary defence against double webhook processing.

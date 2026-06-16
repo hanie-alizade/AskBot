@@ -11,7 +11,7 @@ subscription/state machine reads or writes it.
 
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Integer, String
+from sqlalchemy import BigInteger, Column, DateTime, Integer, String
 
 from database.db import Base
 
@@ -22,7 +22,7 @@ class EmailNotificationLog(Base):
     id = Column(Integer, primary_key=True, index=True)
     # The dedup key: "{user_id}:{new_state}:{snapshot_fingerprint}".
     idempotency_key = Column(String(255), unique=True, index=True, nullable=False)
-    user_id = Column(Integer, index=True, nullable=True)
+    user_id = Column(BigInteger, index=True, nullable=True)  # stores telegram_id
     new_state = Column(String(32), nullable=True)
     email = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)

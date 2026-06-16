@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, Float, Text
+from sqlalchemy import BigInteger, Column, Integer, String, DateTime, Boolean, ForeignKey, Float, Text
 from sqlalchemy.orm import relationship
 from database.db import Base
 
@@ -39,7 +39,9 @@ class Subscription(Base):
     __tablename__ = "subscriptions"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.telegram_id"), nullable=False, index=True)
+    # BigInteger to match users.telegram_id (Postgres requires FK column types
+    # to match the referenced column exactly).
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id"), nullable=False, index=True)
     plan_name = Column(String(50), nullable=False)
     status = Column(String(20), nullable=False, default=SubscriptionStatus.PENDING_PAYMENT)
     start_date = Column(DateTime, nullable=True)
@@ -72,7 +74,8 @@ class Payment(Base):
     __tablename__ = "payments"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.telegram_id"), nullable=False, index=True)
+    # BigInteger to match users.telegram_id (see Subscription.user_id).
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id"), nullable=False, index=True)
     subscription_id = Column(Integer, ForeignKey("subscriptions.id"), nullable=True)
     provider = Column(String(20), nullable=False)
     amount = Column(Float, nullable=False)

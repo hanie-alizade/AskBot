@@ -4,7 +4,7 @@ Defines SQLAlchemy ORM models for user management.
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Text
+from sqlalchemy import BigInteger, Column, Integer, String, DateTime, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .db import Base
@@ -16,7 +16,11 @@ class User(Base):
     __tablename__ = "users"
     
     id = Column(Integer, primary_key=True, index=True)
-    telegram_id = Column(Integer, unique=True, index=True, nullable=False)
+    # BigInteger: modern Telegram user IDs exceed the 32-bit INTEGER ceiling
+    # (2,147,483,647). On PostgreSQL a plain Integer overflows on insert; SQLite
+    # is lenient, which is why this only surfaced in production. See also every
+    # other telegram_id / user_id column in this package.
+    telegram_id = Column(BigInteger, unique=True, index=True, nullable=False)
     username = Column(String(255), nullable=True)
     first_name = Column(String(255), nullable=False)
     status = Column(String(50), nullable=False, default="NEW")
@@ -152,7 +156,7 @@ class Question(Base):
     __tablename__ = "questions"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, index=True, nullable=False)
+    user_id = Column(BigInteger, index=True, nullable=False)  # stores telegram_id
     admin_message_id = Column(Integer, nullable=True)  # Message ID sent to admin
     question_text = Column(Text, nullable=False)
     status = Column(String(20), nullable=False, default="PENDING")  # PENDING, ANSWERED, etc.

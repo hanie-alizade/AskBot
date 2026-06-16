@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Integer, Text
+from sqlalchemy import BigInteger, Column, DateTime, Integer, Text
 
 from database.db import Base
 
@@ -29,7 +29,7 @@ class QuestionSubmissionDraft(Base):
     __tablename__ = "question_submission_drafts"
 
     id = Column(Integer, primary_key=True, index=True)
-    telegram_id = Column(Integer, nullable=False, unique=True, index=True)
+    telegram_id = Column(BigInteger, nullable=False, unique=True, index=True)
     question_text = Column(Text, nullable=False)
     created_at = Column(
         DateTime, default=datetime.utcnow, nullable=False, index=True
